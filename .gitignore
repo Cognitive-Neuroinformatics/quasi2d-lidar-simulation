@@ -1,0 +1,34 @@
+# Python cache
+__pycache__/
+**/__pycache__/
+
+*.pyc
+*.pyo
+*.pyd
+
+# Log files
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VSCode
+.vscode/
+
+# PyCharm
+.idea/
+
+# Conda
+.env
+.venv
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# OS files
+.DS_Store
+Thumbs.db

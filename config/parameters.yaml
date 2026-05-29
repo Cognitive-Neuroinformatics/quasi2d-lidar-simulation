@@ -1,0 +1,72 @@
+dataset:
+  data_percent: 100
+  sets_dir: "/data/waymo/ImageSets"
+
+bev:
+  x_size: 1024
+  y_size: 1024
+  voxel_size: 0.1
+  bev_padding: 3.7
+  z_min: -1
+  z_max: 2
+
+sensors:
+  scala:
+    positions:
+      - name: front_left
+        start_point: [3.255, 0.885, 0.535]
+        rotation_angle: 66
+      - name: front_center
+        start_point: [3.61, -0.154, 0.338]
+        rotation_angle: 0
+      - name: front_right
+        start_point: [3.255, -0.885, 0.535]
+        rotation_angle: -66
+      - name: rear_left
+        start_point: [-0.825, 0.8, 0.345]
+        rotation_angle: -248
+      - name: rear_center
+        start_point: [-1.045, 0, 0.345]
+        rotation_angle: 180
+      - name: rear_right
+        start_point: [-0.825, -0.8, 0.345]
+        rotation_angle: 248
+
+    common:
+      distance: 80
+      horizontal_angle_min: -72.5
+      horizontal_angle_max: 72.5
+      horizontal_rays: 580
+      horizontal_increment: 0.25
+      vertical_angles: [-0.4, 0.4, 1.2]
+
+  scala2:
+    positions:
+      - name: front_left
+        start_point: [3.850, 0.8, 0.353]
+        rotation_angle: 46
+      - name: front_center
+        start_point: [4.105, 0, 0.235]
+        rotation_angle: 0
+      - name: front_right
+        start_point: [3.860, -0.810, 0.350]
+        rotation_angle: -46
+      - name: rear_left
+        start_point: [-0.675, 0.985, 0.423]
+        rotation_angle: -270
+      - name: rear_center
+        start_point: [-1.065, 0, 0.33]
+        rotation_angle: 180
+      - name: rear_right
+        start_point: [-0.680, -0.982, 0.421]
+        rotation_angle: 271
+
+    common:
+      distance: 100
+      horizontal_angle_min: -66.5
+      horizontal_angle_max: 66.5
+      horizontal_rays: 650
+      horizontal_increment:
+        outer: 0.25
+        inner: 0.125
+      vertical_angles: [-4.749, -4.1465, -3.5440, -2.9415, -2.1850, -1.5825, -0.9800, -0.3775, 0.3790, 0.9815, 1.5840, 2.1865, 2.9430, 3.5455, 4.1480, 4.7505]
