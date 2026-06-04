@@ -8,7 +8,7 @@ The framework supports:
 
 * Multi-sensor quasi-2D point cloud simulation
 * BEV image generation with handcrafted input encodings
-* Temporal point cloud fusion (1f, 2f and 4f)
+* Temporal point cloud fusion (2 frames and 4 frames)
 * [OpenPCDet](https://github.com/open-mmlab/OpenPCDet) compatible label generation
 * Multi-frame ground-truth generation for temporal database sampling and data augmentation
 
