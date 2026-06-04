@@ -4,7 +4,7 @@ from transform_utils.math_utils import angle_boxminus
 
 def write_openpcdet_label_file_multiframe(
         transformer_class,
-        i,
+        sensor_name,
         sequence_name,
         filtered_bounding_boxes,
         frame_index,
@@ -21,7 +21,7 @@ def write_openpcdet_label_file_multiframe(
 
         """
 
-        fname = f"{sequence_name}_sensor_{i}_{frame_index:03d}.txt"
+        fname = f"{sequence_name}_{sensor_name}_{frame_index:03d}.txt"
 
         # Build output paths and ensure dirs exist
         out_paths = []

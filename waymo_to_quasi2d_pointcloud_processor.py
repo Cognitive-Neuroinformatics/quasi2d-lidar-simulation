@@ -251,7 +251,7 @@ class WaymoDataProcessor:
             if need_labels:
                 annos_cur_baselink = write_openpcdet_label_file_multiframe(
                     self.transformer,
-                    i,
+                    sensor_name,
                     sequence_name,
                     filtered_bounding_boxes,
                     frame_index,
