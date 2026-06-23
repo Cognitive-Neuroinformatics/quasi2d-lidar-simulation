@@ -1,6 +1,6 @@
 dataset:
   data_percent: 100
-  sets_dir: "/data/waymo/ImageSets"
+  sets_dir: "/data/waymo/ImageSets_samanti"
 
 bev:
   x_size: 1024

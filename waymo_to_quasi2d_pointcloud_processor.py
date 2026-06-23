@@ -433,19 +433,17 @@ class WaymoDataProcessor:
                 if need_gt_2f:
                     gt_track_writer.update_multiframe(
                         sequence_name=sequence_name,
-                        sensor_i=i,
+                        sensor_i=sensor_name,
                         frame_index=frame_index,
-                        annos_list_in_cur_with_track=annos_list_sensor_in_cur[:2],
-                        subdir=f"2f"
+                        annos_list_in_cur_with_track=annos_list_sensor_in_cur[:2]
                     )
 
                 if need_gt_4f:
                     gt_track_writer.update_multiframe(
                         sequence_name=sequence_name,
-                        sensor_i=i,
+                        sensor_i=sensor_name,
                         frame_index=frame_index,
-                        annos_list_in_cur_with_track=annos_list_sensor_in_cur,
-                        subdir=f"4f"
+                        annos_list_in_cur_with_track=annos_list_sensor_in_cur
                     )
 
 

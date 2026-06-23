@@ -26,7 +26,7 @@ This repository transforms raw Waymo Open Dataset recordings into sensor-specifi
 * BEV-based perception
 * Multi-frame temporal fusion and 3D object detection
 
-The generated outputs are directly compatible with OpenPCDet-based training pipelines.
+The generated outputs are directly compatible with [OpenPCDet](https://github.com/open-mmlab/OpenPCDet)-based training pipelines.
 
 ---
 

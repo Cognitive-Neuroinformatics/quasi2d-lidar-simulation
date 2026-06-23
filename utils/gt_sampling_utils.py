@@ -102,10 +102,10 @@ class GTTrackJSONWriter:
         self.root = Path(out_dir_json)
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def _json_path(self, sequence_name: str, sensor_i: int, frame_index: int, subdir: str) -> Path:
-        out_dir = self.root / subdir
+    def _json_path(self, sequence_name: str, sensor_i: int, frame_index: int) -> Path:
+        out_dir = self.root 
         out_dir.mkdir(parents=True, exist_ok=True)
-        return out_dir / f"{sequence_name}_sensor_{sensor_i}_{frame_index:03d}.json"
+        return out_dir / f"{sequence_name}_{sensor_i}_{frame_index:03d}.json"
 
     def update_multiframe(
         self,
@@ -113,11 +113,9 @@ class GTTrackJSONWriter:
         sensor_i: int,
         frame_index: int,
         annos_list_in_cur_with_track: List[Optional[Dict]],
-        subdir: str,
     ):
         """
         annos_list_in_cur_with_track: [t, t-1, t-2, t-3] but each is already transformed into CURRENT frame.
-        subdir: e.g. "2f", "3f", "4f"
         """
         frames = []
         for k, annos in enumerate(annos_list_in_cur_with_track):
@@ -127,11 +125,11 @@ class GTTrackJSONWriter:
 
         payload = {
             "sequence_name": sequence_name,
-            "sensor": int(sensor_i),
+            "sensor": sensor_i,
             "frame_index": int(frame_index),
             "num_frames": int(len([a for a in annos_list_in_cur_with_track if a is not None])),
             "frames": frames,
         }
-        p = self._json_path(sequence_name, sensor_i, frame_index, subdir=subdir)
+        p = self._json_path(sequence_name, sensor_i, frame_index)
         with p.open("w") as f:
             json.dump(payload, f, indent=2)
