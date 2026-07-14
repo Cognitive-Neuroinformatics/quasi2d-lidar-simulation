@@ -114,7 +114,7 @@ class TransformScan2D():
 
     def point2pixel(self, point):
             """ Convert 3D point to 2D pixel coordinates based on sensor type """
-            if self.sensor in ['scala', 't7']:
+            if self.sensor in ['scala', 'scala2']:
                 pixel_x = int(point[0] / self.resolution)
                 pixel_y = int((self.y_size / 2 - point[1] / self.resolution))
                 return [pixel_x, pixel_y]

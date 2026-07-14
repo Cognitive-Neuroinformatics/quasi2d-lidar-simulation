@@ -40,26 +40,72 @@ sensors:
       horizontal_increment: 0.25
       vertical_angles: [-0.4, 0.4, 1.2]
 
-  scala2:
+  # old config with only yaw considered for rotation angle, and different lidar positions
+  # scala2:
+  #   positions:
+  #     - name: front_left
+  #       start_point: [3.850, 0.8, 0.743]
+  #       rotation_angle_z: 46
+  #     - name: front_center
+  #       start_point: [4.105, 0, 0.235]
+  #       rotation_angle: 0
+  #     - name: front_right
+  #       start_point: [3.860, -0.810, 0.350]
+  #       rotation_angle: -46
+  #     - name: rear_left
+  #       start_point: [-0.675, 0.985, 0.423]
+  #       rotation_angle: -270
+  #     - name: rear_center
+  #       start_point: [-1.065, 0, 0.33]
+  #       rotation_angle: 180
+  #     - name: rear_right
+  #       start_point: [-0.680, -0.982, 0.421]
+  #       rotation_angle: 271
+
+
+    scala2:
     positions:
       - name: front_left
-        start_point: [3.850, 0.8, 0.353]
-        rotation_angle: 46
+        start_point: [3.850, 0.800, 0.743]
+        rotation_angle_x: 0.005826
+        rotation_angle_y: -0.016451
+        rotation_angle_z: 0.333756
+        rotation_angle_w: 0.942498
+
       - name: front_center
-        start_point: [4.105, 0, 0.235]
-        rotation_angle: 0
+        start_point: [4.105, 0.000, 0.625]
+        rotation_angle_x: 0.000000
+        rotation_angle_y: 0.006981
+        rotation_angle_z: 0.000000
+        rotation_angle_w: 0.999976
+
       - name: front_right
-        start_point: [3.860, -0.810, 0.350]
-        rotation_angle: -46
+        start_point: [3.860, -0.810, 0.740]
+        rotation_angle_x: 0.000000
+        rotation_angle_y: 0.000000
+        rotation_angle_z: -0.358368
+        rotation_angle_w: 0.933580
+
       - name: rear_left
-        start_point: [-0.675, 0.985, 0.423]
-        rotation_angle: -270
+        start_point: [-0.675, 0.985, 0.740]
+        rotation_angle_x: 0.000000
+        rotation_angle_y: 0.000000
+        rotation_angle_z: 0.7071068
+        rotation_angle_w: 0.7071068
+
       - name: rear_center
-        start_point: [-1.065, 0, 0.33]
-        rotation_angle: 180
+        start_point: [-1.065, 0.000, 0.350]
+        rotation_angle_x: -0.017450
+        rotation_angle_y: 0.000260
+        rotation_angle_z: 0.999800
+        rotation_angle_w: 0.000110
+
       - name: rear_right
-        start_point: [-0.680, -0.982, 0.421]
-        rotation_angle: 271
+        start_point: [-0.680, -0.982, 0.741]
+        rotation_angle_x: 0.000000
+        rotation_angle_y: 0.000000
+        rotation_angle_z: -0.7325429
+        rotation_angle_w: 0.6807209
 
     common:
       distance: 100
