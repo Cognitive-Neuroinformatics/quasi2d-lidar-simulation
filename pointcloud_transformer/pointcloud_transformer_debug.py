@@ -1,4 +1,5 @@
 import os
+import csv
 import math
 import numpy as np
 import transformations as tf_transformations
@@ -488,6 +489,10 @@ class PointCloudTransformer:
         rotation_quaternion_xyzw=None,
         mirror_side=0,
         scala2_common=None,
+        ray_debug_output_dir=None,
+        ray_snapshot_interval=100,
+        debug_apd_group=None,
+        debug_layer=None,
     ):
         pointcloud_non_ground = original_pointcloud
         
@@ -584,17 +589,33 @@ class PointCloudTransformer:
         
         # debug mode
         
-        pointcloud_simulation, debug_records = (
-            self.simulate_point_cloud_with_original_point(
-                start_point=start_point,
-                all_endpoints=all_endpoints_vec,
-                start_voxel=start_voxel,
-                voxel_points_map=voxel_points_map,
-                ray_metadata=ray_metadata,
-                debug=True,
-                debug_ray_indices=set(),
-            )
+        (
+            pointcloud_simulation,
+            debug_records,
+            ray_hit_records,
+        ) = self.simulate_point_cloud_with_original_point(
+            start_point=start_point,
+            all_endpoints=all_endpoints_vec,
+            start_voxel=start_voxel,
+            voxel_points_map=voxel_points_map,
+            ray_metadata=ray_metadata,
+            debug=True,
+            debug_ray_indices=set(),
+            snapshot_interval=ray_snapshot_interval,
+            snapshot_directory=ray_debug_output_dir,
+            debug_apd_group=debug_apd_group,
+            debug_layer=debug_layer,
         )
+
+        if ray_debug_output_dir is not None:
+            os.makedirs(ray_debug_output_dir, exist_ok=True)
+            self.save_ray_hit_records_csv(
+                ray_hit_records=ray_hit_records,
+                output_path=os.path.join(
+                    ray_debug_output_dir,
+                    "ray_hit_records.csv",
+                ),
+            )
 
         self.print_ray_debug_summary(
             debug_records,
@@ -770,6 +791,10 @@ class PointCloudTransformer:
         debug=False,
         debug_ray_indices=None,
         max_candidate_points_to_store=20,
+        snapshot_interval=None,
+        snapshot_directory=None,
+        debug_apd_group=None,
+        debug_layer=None,
     ):
         """
         Simulate one LiDAR return per emitted ray.
@@ -831,6 +856,29 @@ class PointCloudTransformer:
                 dtype=np.float32,
             )
 
+            metadata = (
+                self.get_scala2_ray_metadata(
+                    ray_metadata=ray_metadata,
+                    ray_idx=ray_idx,
+                )
+                if ray_metadata is not None
+                else None
+            )
+
+            # Optional single-channel debugging. With both values set, only
+            # rays from that SCALA2 (APD group, layer) are simulated.
+            if metadata is not None:
+                if (
+                    debug_apd_group is not None
+                    and metadata["apd_group"] != debug_apd_group
+                ):
+                    continue
+                if (
+                    debug_layer is not None
+                    and metadata["layer"] != debug_layer
+                ):
+                    continue
+
             should_debug_ray = (
                 debug
                 and (
@@ -846,19 +894,22 @@ class PointCloudTransformer:
                 if debug:
                     debug_records.append({
                         "ray_index": ray_idx,
-                        "metadata": (
-                            self.get_scala2_ray_metadata(
-                                ray_metadata=ray_metadata,
-                                ray_idx=ray_idx,
-                            )
-                            if ray_metadata is not None
-                            else None
-                        ),
+                        "metadata": metadata,
                         "origin": start_xyz.copy(),
                         "endpoint": end_xyz.copy(),
                         "status": "invalid_zero_length_ray",
                         "selected_point": None,
                     })
+                ray_hit_records.append({
+                    "ray_index": int(ray_idx),
+                    "status": "invalid_zero_length_ray",
+                    "column_id": None if metadata is None else metadata["column_id"],
+                    "apd_group": None if metadata is None else metadata["apd_group"],
+                    "layer": None if metadata is None else metadata["layer"],
+                    "mirror_side": None if metadata is None else metadata["mirror_side"],
+                    "azimuth_deg_sensor": None if metadata is None else metadata["azimuth_deg_sensor"],
+                    "elevation_deg_sensor": None if metadata is None else metadata["elevation_deg_sensor"],
+                })
                 continue
 
             ray_direction = ray_vector / ray_length
@@ -890,14 +941,7 @@ class PointCloudTransformer:
             if debug:
                 ray_record = {
                     "ray_index": ray_idx,
-                    "metadata": (
-                        self.get_scala2_ray_metadata(
-                            ray_metadata=ray_metadata,
-                            ray_idx=ray_idx,
-                        )
-                        if ray_metadata is not None
-                        else None
-                    ),
+                    "metadata": metadata,
                     "origin": start_xyz.copy(),
                     "endpoint": end_xyz.copy(),
                     "ray_direction": ray_direction.copy(),
@@ -1113,6 +1157,45 @@ class PointCloudTransformer:
                     )
                 )
 
+                rep_elevation_deg = float(
+                    np.degrees(
+                        np.arctan2(
+                            rep_relative[2],
+                            np.linalg.norm(rep_relative[:2]),
+                        )
+                    )
+                )
+
+                ray_hit_records.append({
+                    "ray_index": int(ray_idx),
+                    "status": "hit",
+                    "column_id": None if metadata is None else metadata["column_id"],
+                    "apd_group": None if metadata is None else metadata["apd_group"],
+                    "layer": None if metadata is None else metadata["layer"],
+                    "channel_id": (
+                        None
+                        if metadata is None
+                        else metadata["apd_group"] * 4 + metadata["layer"]
+                    ),
+                    "mirror_side": None if metadata is None else metadata["mirror_side"],
+                    "azimuth_deg_sensor": None if metadata is None else metadata["azimuth_deg_sensor"],
+                    "elevation_deg_sensor": None if metadata is None else metadata["elevation_deg_sensor"],
+                    "elevation_deg_vehicle": actual_elevation_deg_vehicle,
+                    "selected_voxel_x": int(voxel_coord[0]),
+                    "selected_voxel_y": int(voxel_coord[1]),
+                    "selected_voxel_z": int(voxel_coord[2]),
+                    "representative_x": float(rep_xyz[0]),
+                    "representative_y": float(rep_xyz[1]),
+                    "representative_z": float(rep_xyz[2]),
+                    "projected_x": float(projected_xyz[0]),
+                    "projected_y": float(projected_xyz[1]),
+                    "projected_z": float(projected_xyz[2]),
+                    "representative_range_m": rep_distance,
+                    "representative_elevation_deg": rep_elevation_deg,
+                    "perpendicular_distance_m": rep_perpendicular_distance,
+                    "projection_displacement_m": projection_displacement,
+                })
+
                 if should_debug_ray:
                     occupied_voxel_record["status"] = "selected"
                     ray_record["occupied_voxels"].append(
@@ -1160,11 +1243,51 @@ class PointCloudTransformer:
                 # A ray must generate at most one hit.
                 break
 
+            if not hit_found:
+                ray_hit_records.append({
+                    "ray_index": int(ray_idx),
+                    "status": "no_hit",
+                    "column_id": None if metadata is None else metadata["column_id"],
+                    "apd_group": None if metadata is None else metadata["apd_group"],
+                    "layer": None if metadata is None else metadata["layer"],
+                    "channel_id": (
+                        None
+                        if metadata is None
+                        else metadata["apd_group"] * 4 + metadata["layer"]
+                    ),
+                    "mirror_side": None if metadata is None else metadata["mirror_side"],
+                    "azimuth_deg_sensor": None if metadata is None else metadata["azimuth_deg_sensor"],
+                    "elevation_deg_sensor": None if metadata is None else metadata["elevation_deg_sensor"],
+                    "elevation_deg_vehicle": actual_elevation_deg_vehicle,
+                })
+
             if debug:
                 if not hit_found:
                     ray_record["status"] = "no_hit"
 
                 debug_records.append(ray_record)
+
+            if (
+                snapshot_directory is not None
+                and snapshot_interval is not None
+                and snapshot_interval > 0
+                and (
+                    (ray_idx + 1) % snapshot_interval == 0
+                    or ray_idx == len(all_endpoints) - 1
+                )
+            ):
+                os.makedirs(snapshot_directory, exist_ok=True)
+                snapshot = np.asarray(
+                    pointcloud_simulation,
+                    dtype=np.float32,
+                )
+                np.save(
+                    os.path.join(
+                        snapshot_directory,
+                        f"rays_000000_to_{ray_idx:06d}.npy",
+                    ),
+                    snapshot,
+                )
 
         pointcloud_simulation = np.asarray(
             pointcloud_simulation,
@@ -1172,11 +1295,49 @@ class PointCloudTransformer:
         )
 
         if debug:
-            return pointcloud_simulation, debug_records
+            return (
+                pointcloud_simulation,
+                debug_records,
+                ray_hit_records,
+            )
 
         return pointcloud_simulation
     
     
+    def save_ray_hit_records_csv(
+        self,
+        ray_hit_records,
+        output_path,
+    ):
+        """Save the ray-to-hit mapping in a human-readable CSV file."""
+        if not ray_hit_records:
+            print("No ray-hit records to save.")
+            return
+
+        output_directory = os.path.dirname(output_path)
+        if output_directory:
+            os.makedirs(output_directory, exist_ok=True)
+
+        fieldnames = []
+        for record in ray_hit_records:
+            for key in record:
+                if key not in fieldnames:
+                    fieldnames.append(key)
+
+        with open(output_path, "w", newline="") as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=fieldnames,
+                extrasaction="ignore",
+            )
+            writer.writeheader()
+            writer.writerows(ray_hit_records)
+
+        print(
+            f"Saved {len(ray_hit_records)} ray records to: "
+            f"{output_path}"
+        )
+
     def _build_candidate_ray_debug(
         self,
         start_xyz,
@@ -1877,7 +2038,6 @@ class PointCloudTransformer:
                 ray_metadata["mirror_side"][ray_idx]
             ),
         }
-
 
 
 
