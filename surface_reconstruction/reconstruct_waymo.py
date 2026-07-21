@@ -5,43 +5,191 @@ import numpy as np
 import open3d as o3d
 import tensorflow as tf
 
-from waymo_open_dataset import dataset_pb2
-from waymo_open_dataset.utils import frame_utils
+from waymo_open_dataset import dataset_pb2 as open_dataset
+from waymo_open_dataset.utils.frame_utils import parse_range_image_and_camera_projection
+from waymo_open_dataset.utils import transform_utils, range_image_utils
 
+filter_no_label_zone_points = True
 
-def extract_waymo_point_cloud(frame: dataset_pb2.Frame) -> np.ndarray:
+def convert_range_image_to_point_cloud(frame,
+                                       range_images,
+                                       camera_projections,
+                                       range_image_top_pose,
+                                       ri_index=0,
+                                       lidar_list=[1,2,3,4,5]):
+    """Convert range images to point cloud.
+    Args:
+      frame: open dataset frame
+       range_images: A dict of {laser_name, [range_image_first_return,
+         range_image_second_return]}.
+       camera_projections: A dict of {laser_name,
+         [camera_projection_from_first_return,
+         camera_projection_from_second_return]}.
+      range_image_top_pose: range image pixel pose for top lidar.
+      ri_index: 0 for the first return, 1 for the second return.
+      lidar_list: List of lidar sensors to convert, default all = [1,2,3,4,5]
+    Returns:
+      points: {[N, 3]} list of 3d lidar points of length 5 (number of lidars).
+      cp_points: {[N, 6]} list of camera projections of length 5
+        (number of lidars).
     """
-    Convert all lidar returns in one Waymo frame into one merged XYZ cloud
-    in the Waymo vehicle coordinate system.
-    """
+    calibrations = sorted(frame.context.laser_calibrations, key=lambda c: c.name)
+    points = []
+    cp_points = []
+    point_features = []
 
+    frame_pose = tf.convert_to_tensor(
+        value=np.reshape(np.array(frame.pose.transform), [4, 4]))
+    # [H, W, 6]
+    range_image_top_pose_tensor = tf.reshape(
+        tf.convert_to_tensor(value=range_image_top_pose.data),
+        range_image_top_pose.shape.dims)
+    # [H, W, 3, 3]
+    range_image_top_pose_tensor_rotation = transform_utils.get_rotation_matrix(
+        range_image_top_pose_tensor[..., 0], range_image_top_pose_tensor[..., 1],
+        range_image_top_pose_tensor[..., 2])
+    range_image_top_pose_tensor_translation = range_image_top_pose_tensor[..., 3:]
+    range_image_top_pose_tensor = transform_utils.get_transform(
+        range_image_top_pose_tensor_rotation,
+        range_image_top_pose_tensor_translation)
+
+    for c in calibrations:
+        if c.name in lidar_list:
+            #print(c.name)
+            range_image = range_images[c.name][ri_index]
+            if len(c.beam_inclinations) == 0:  # pylint: disable=g-explicit-length-test
+                beam_inclinations = range_image_utils.compute_inclination(
+                    tf.constant([c.beam_inclination_min, c.beam_inclination_max]),
+                    height=range_image.shape.dims[0])
+            else:
+                beam_inclinations = tf.constant(c.beam_inclinations)
+
+            beam_inclinations = tf.reverse(beam_inclinations, axis=[-1])
+            extrinsic = np.reshape(np.array(c.extrinsic.transform), [4, 4])
+
+            range_image_tensor = tf.reshape(
+                tf.convert_to_tensor(value=range_image.data), range_image.shape.dims)
+
+            pixel_pose_local = None
+            frame_pose_local = None
+            if c.name == open_dataset.LaserName.TOP:
+                pixel_pose_local = range_image_top_pose_tensor
+                pixel_pose_local = tf.expand_dims(pixel_pose_local, axis=0)
+                frame_pose_local = tf.expand_dims(frame_pose, axis=0)
+            range_image_mask = range_image_tensor[..., 0] > 0
+
+            # No Label Zone
+            if filter_no_label_zone_points:
+                nlz_mask = range_image_tensor[..., 3] != 1.0  # 1.0: in NLZ
+                # print(range_image_tensor[range_image_tensor[..., 3] == 1.0])
+                range_image_mask = range_image_mask & nlz_mask
+
+            range_image_cartesian = range_image_utils.extract_point_cloud_from_range_image(
+                tf.expand_dims(range_image_tensor[..., 0], axis=0),
+                tf.expand_dims(extrinsic, axis=0),
+                tf.expand_dims(tf.convert_to_tensor(value=beam_inclinations), axis=0),
+                pixel_pose=pixel_pose_local,
+                frame_pose=frame_pose_local)
+
+            range_image_polar = range_image_utils.compute_range_image_polar(
+                tf.expand_dims(range_image_tensor[..., 0], axis=0),
+                tf.expand_dims(extrinsic, axis=0),
+                tf.expand_dims(tf.convert_to_tensor(value=beam_inclinations), axis=0))
+            range_image_polar = tf.squeeze(range_image_polar, axis=0)
+
+            range_image_cartesian = tf.squeeze(range_image_cartesian, axis=0)
+            points_tensor = tf.gather_nd(range_image_cartesian,
+                                         tf.compat.v1.where(range_image_mask))
+
+            cp = camera_projections[c.name][ri_index]
+            cp_tensor = tf.reshape(tf.convert_to_tensor(value=cp.data), cp.shape.dims)
+            cp_points_tensor = tf.gather_nd(cp_tensor,
+                                            tf.compat.v1.where(range_image_mask))
+            points.append(points_tensor.numpy())
+            cp_points.append(cp_points_tensor.numpy())
+
+            point_features_tensor = tf.gather_nd(
+                range_image_tensor,
+                tf.where(range_image_mask)
+            )
+
+            point_features.append(
+                point_features_tensor.numpy()[:, 1:]
+            )
+
+    return points, cp_points, point_features
+def extract_point_cloud(frame):
     (
         range_images,
         camera_projections,
-        segmentation_labels,
+        _,
         range_image_top_pose,
-    ) = frame_utils.parse_range_image_and_camera_projection(frame)
+    ) = parse_range_image_and_camera_projection(frame)
 
-    points, _ = frame_utils.convert_range_image_to_point_cloud(
-        frame=frame,
-        range_images=range_images,
-        camera_projections=camera_projections,
-        range_image_top_pose=range_image_top_pose,
-        ri_index=0,
+    points_0, _, features_0 = (
+        convert_range_image_to_point_cloud(
+            frame,
+            range_images,
+            camera_projections,
+            range_image_top_pose,
+            ri_index=0,
+            lidar_list=[1, 2, 3, 4, 5],
+        )
     )
 
-    # points is a list: one point cloud for each Waymo lidar.
-    merged_points = np.concatenate(points, axis=0)
+    points_0 = np.concatenate(
+        points_0,
+        axis=0,
+    )
 
-    return merged_points[:, :3].astype(np.float64)
+    features_0 = np.concatenate(
+        features_0,
+        axis=0,
+    )
 
+    points_1, _, features_1 = (
+        convert_range_image_to_point_cloud(
+            frame,
+            range_images,
+            camera_projections,
+            range_image_top_pose,
+            ri_index=1,
+            lidar_list=[1, 2, 3, 4, 5],
+        )
+    )
+
+    points_1 = np.concatenate(
+        points_1,
+        axis=0,
+    )
+
+    features_1 = np.concatenate(
+        features_1,
+        axis=0,
+    )
+
+    points = np.concatenate(
+        [points_0, points_1],
+        axis=0,
+    )
+
+    features = np.concatenate(
+        [features_0, features_1],
+        axis=0,
+    )
+
+    original_pointcloud = np.column_stack(
+        (points, features)
+    )
+
+    return original_pointcloud
 
 def prepare_point_cloud(
     points_xyz: np.ndarray,
-    voxel_size: float = 0.10,
 ) -> o3d.geometry.PointCloud:
     """
-    Create, clean and estimate normals for an Open3D point cloud.
+    Create a point cloud and estimate surface normals.
+    No voxel downsampling or outlier removal is applied.
     """
 
     valid = np.isfinite(points_xyz).all(axis=1)
@@ -50,18 +198,33 @@ def prepare_point_cloud(
     point_cloud = o3d.geometry.PointCloud()
     point_cloud.points = o3d.utility.Vector3dVector(points_xyz)
 
-    # Optional downsampling.
-    point_cloud = point_cloud.voxel_down_sample(voxel_size)
-
-    # Remove isolated points.
-    if len(point_cloud.points) >= 30:
-        point_cloud, _ = point_cloud.remove_statistical_outlier(
-            nb_neighbors=20,
-            std_ratio=2.0,
+    if len(point_cloud.points) < 3:
+        raise ValueError(
+            "At least three valid points are needed."
         )
 
-    # Normals are required by Ball Pivoting and Poisson.
-    normal_radius = max(voxel_size * 4.0, 0.30)
+    distances = np.asarray(
+        point_cloud.compute_nearest_neighbor_distance()
+    )
+
+    valid_distances = distances[
+        np.isfinite(distances) & (distances > 0)
+    ]
+
+    if len(valid_distances) == 0:
+        raise ValueError(
+            "Could not estimate point spacing."
+        )
+
+    median_spacing = float(np.median(valid_distances))
+
+    normal_radius = max(
+        4.0 * median_spacing,
+        0.20,
+    )
+
+    print(f"Median point spacing: {median_spacing:.4f} m")
+    print(f"Normal radius: {normal_radius:.4f} m")
 
     point_cloud.estimate_normals(
         search_param=o3d.geometry.KDTreeSearchParamHybrid(
@@ -70,7 +233,6 @@ def prepare_point_cloud(
         )
     )
 
-    # Approximate the Waymo vehicle origin as the viewpoint.
     point_cloud.orient_normals_towards_camera_location(
         np.array([0.0, 0.0, 0.0])
     )
@@ -78,8 +240,6 @@ def prepare_point_cloud(
     point_cloud.normalize_normals()
 
     return point_cloud
-
-
 def reconstruct_ball_pivoting(
     point_cloud: o3d.geometry.PointCloud,
 ) -> o3d.geometry.TriangleMesh:
@@ -173,8 +333,7 @@ def clean_mesh(
 def process_tfrecord(
     tfrecord_path: str,
     output_directory: str,
-    maximum_frames = None,
-    voxel_size = 0.10,
+    maximum_frames=None,
 ) -> None:
     output_path = Path(output_directory)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -190,17 +349,15 @@ def process_tfrecord(
 
         print(f"\nProcessing frame {frame_index:03d}")
 
-        frame = dataset_pb2.Frame()
+        frame = open_dataset.Frame()
         frame.ParseFromString(record.numpy())
 
-        points_xyz = extract_waymo_point_cloud(frame)
+        original_pointcloud = extract_point_cloud(frame)
+        points_xyz = original_pointcloud[:, :3]
 
         print(f"Raw points: {len(points_xyz)}")
 
-        point_cloud = prepare_point_cloud(
-            points_xyz,
-            voxel_size=voxel_size,
-        )
+        point_cloud = prepare_point_cloud(points_xyz)
 
         print(f"Processed points: {len(point_cloud.points)}")
 
@@ -295,11 +452,6 @@ if __name__ == "__main__":
         type=int,
         default=None,
     )
-    parser.add_argument(
-        "--voxel_size",
-        type=float,
-        default=0.10,
-    )
 
     args = parser.parse_args()
 
@@ -307,7 +459,6 @@ if __name__ == "__main__":
         tfrecord_path=args.tfrecord,
         output_directory=args.output,
         maximum_frames=args.max_frames,
-        voxel_size=args.voxel_size,
     )
     
     
@@ -317,5 +468,4 @@ if __name__ == "__main__":
 # python reconstruct_waymo.py \
 #     --tfrecord /data/waymo/raw_data/segment-898816942644052013_20_000_40_000_with_camera_labels.tfrecord \
 #     --output reconstruction_test \
-#     --max_frames 3 \
-#     --voxel_size 0.10
+#     --max_frames 3
