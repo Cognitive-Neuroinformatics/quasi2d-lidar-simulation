@@ -37,7 +37,13 @@ class WaymoDataProcessor:
         save_outputs=None,
         selected_sensors=None,
         num_proc=28,
-        transformation_mode="localsensor"
+        transformation_mode="localsensor",
+        ray_debug_output_dir=None,
+        ray_snapshot_interval=100,
+        ray_debug_apd_group=None,
+        ray_debug_layer=None,
+        inspect_all_apd_groups=False,
+        ray_debug_max_frames=1,
     ):    
         # turn on eager execution for older tensorflow versions
         if int(tf.__version__.split('.')[0]) < 2:
@@ -75,6 +81,24 @@ class WaymoDataProcessor:
         self.load_tfrecords_by_prefix()
         self.sensor = sensor
         self.transformation_mode = transformation_mode
+
+        # Optional SCALA2 ray-debug configuration.
+        self.ray_debug_output_dir = (
+            Path(ray_debug_output_dir)
+            if ray_debug_output_dir is not None
+            else None
+        )
+        self.ray_snapshot_interval = ray_snapshot_interval
+        self.ray_debug_apd_group = ray_debug_apd_group
+        self.ray_debug_layer = ray_debug_layer
+        self.inspect_all_apd_groups = inspect_all_apd_groups
+        self.ray_debug_max_frames = max(0, int(ray_debug_max_frames))
+
+        if self.ray_debug_layer is not None and self.ray_debug_apd_group is None:
+            raise ValueError(
+                "ray_debug_layer requires ray_debug_apd_group."
+            )
+
         self.transformer = PointCloudTransformer(voxel_size=self.voxel_size, ground_removal_method=None)
         self.transformer3D = TransformScan3D(self.sensor)
         self.transformer2D = TransformScan2D(self.sensor, self.x_size, self.y_size, self.z_min, self.z_max, self.resolution)
@@ -127,6 +151,8 @@ class WaymoDataProcessor:
                 self.transform_point_clouds(
                     original_pointcloud=original_pointcloud,
                     mirror_side=mirror_side,
+                    sequence_name=sequence_name,
+                    frame_index=frame_index,
                 )
             )
 
@@ -146,6 +172,8 @@ class WaymoDataProcessor:
         self,
         original_pointcloud,
         mirror_side=None,
+        sequence_name=None,
+        frame_index=None,
     ):
         """
         Simulate the point cloud for every selected virtual sensor.
@@ -188,6 +216,23 @@ class WaymoDataProcessor:
             )
 
             if self.sensor == "scala2":
+                debug_this_frame = (
+                    self.ray_debug_output_dir is not None
+                    and frame_index is not None
+                    and frame_index < self.ray_debug_max_frames
+                )
+
+                selected_debug_dir = None
+                if debug_this_frame:
+                    selected_debug_dir = (
+                        self.ray_debug_output_dir
+                        / str(sequence_name)
+                        / f"frame_{frame_index:03d}"
+                        / sensor_name
+                        / f"mirror_{mirror_side}"
+                        / "selected_output"
+                    )
+
                 transformed_pointcloud, ray_metadata = (
                     self.transformer.transform_point_cloud(
                         sensor=self.sensor,
@@ -204,8 +249,92 @@ class WaymoDataProcessor:
                         ),
                         mirror_side=mirror_side,
                         scala2_common=param_set["common"],
+                        ray_debug_output_dir=(
+                            str(selected_debug_dir)
+                            if selected_debug_dir is not None
+                            else None
+                        ),
+                        ray_snapshot_interval=(
+                            self.ray_snapshot_interval
+                        ),
+                        debug_apd_group=(
+                            self.ray_debug_apd_group
+                            if debug_this_frame
+                            else None
+                        ),
+                        debug_layer=(
+                            self.ray_debug_layer
+                            if debug_this_frame
+                            else None
+                        ),
                     )
                 )
+
+                # Save each APD group separately for direct comparison.
+                # The normal transformed_pointcloud above remains unchanged.
+                if debug_this_frame and self.inspect_all_apd_groups:
+                    comparison_root = (
+                        self.ray_debug_output_dir
+                        / str(sequence_name)
+                        / f"frame_{frame_index:03d}"
+                        / sensor_name
+                        / f"mirror_{mirror_side}"
+                        / "apd_comparison"
+                    )
+
+                    for apd_group in range(4):
+                        apd_dir = (
+                            comparison_root
+                            / f"apd_group_{apd_group}"
+                        )
+
+                        apd_pointcloud, _ = (
+                            self.transformer.transform_point_cloud(
+                                sensor=self.sensor,
+                                original_pointcloud=original_pointcloud,
+                                start_point=start_point,
+                                dist=distance,
+                                horizontal_angle_min=horizontal_angle_min,
+                                horizontal_angle_max=horizontal_angle_max,
+                                horizontal_rays=None,
+                                vertical_angles=None,
+                                rotation_angle=None,
+                                rotation_quaternion_xyzw=(
+                                    rotation_quaternion_xyzw
+                                ),
+                                mirror_side=mirror_side,
+                                scala2_common=param_set["common"],
+                                ray_debug_output_dir=str(apd_dir),
+                                ray_snapshot_interval=(
+                                    self.ray_snapshot_interval
+                                ),
+                                debug_apd_group=apd_group,
+                                debug_layer=None,
+                            )
+                        )
+
+                        apd_dir.mkdir(
+                            parents=True,
+                            exist_ok=True,
+                        )
+
+                        np.save(
+                            apd_dir
+                            / f"final_apd_group_{apd_group}.npy",
+                            np.asarray(
+                                apd_pointcloud,
+                                dtype=np.float32,
+                            ),
+                        )
+
+                        print(
+                            f"[RAY DEBUG] {sequence_name}, "
+                            f"frame={frame_index}, "
+                            f"sensor={sensor_name}, "
+                            f"mirror={mirror_side}, "
+                            f"APD={apd_group}: "
+                            f"{len(apd_pointcloud)} points"
+                        )
 
             else:
                 transformed_pointcloud, ray_metadata = (
@@ -366,7 +495,7 @@ class WaymoDataProcessor:
                 buf = deque(maxlen=3)
                 self.previous_buffer[i] = buf
 
-            # 4) precompute sensor transform for this frame
+            # 4) precompute sensor transform for THIS frame
             yaw_rad = np.deg2rad(metadata["rotation_angle"])
             T_baselink_from_sensor, T_sensor_from_baselink = self.transformer.get_sensor_transforms(metadata, self.bev_padding)
 
@@ -536,7 +665,7 @@ class WaymoDataProcessor:
                     )
 
 
-            # 6) update history buffer 
+            # 6) update history buffer (store ORIGINAL baselink-frame pc + BASELINK annos)
             buf.append({
                 "pose": vehicle_pose,
                 "pc": pc_curr_baselink.copy(),
@@ -809,13 +938,88 @@ if __name__ == "__main__":
     parser.add_argument('--transformation_mode', type=str, default='localsensor',
                         choices=['localsensor'],
                         help='Transformation method to use: "localsensor" for local sensor positioning. Currently this code supports only this mode.')
+
+    parser.add_argument(
+        "--ray_debug_output_dir",
+        type=str,
+        default=None,
+        help=(
+            "Optional root directory for ray-hit CSV files and "
+            "progressive point-cloud snapshots."
+        ),
+    )
+    parser.add_argument(
+        "--ray_snapshot_interval",
+        type=int,
+        default=100,
+        help="Save one cumulative ray snapshot after this many rays.",
+    )
+    parser.add_argument(
+        "--ray_debug_apd_group",
+        type=int,
+        choices=[0, 1, 2, 3],
+        default=None,
+        help=(
+            "Restrict the selected debug output to one APD group."
+        ),
+    )
+    parser.add_argument(
+        "--ray_debug_layer",
+        type=int,
+        choices=[0, 1, 2, 3],
+        default=None,
+        help="Optionally restrict the selected APD group to one layer.",
+    )
+    parser.add_argument(
+        "--inspect_all_apd_groups",
+        action="store_true",
+        help=(
+            "Also simulate APD groups 0-3 separately and save "
+            "their final point clouds."
+        ),
+    )
+    parser.add_argument(
+        "--ray_debug_max_frames",
+        type=int,
+        default=1,
+        help=(
+            "Number of frames per sequence for which debug files "
+            "are produced."
+        ),
+    )
+
     args = parser.parse_args()
+
+    if (
+        args.ray_debug_layer is not None
+        and args.ray_debug_apd_group is None
+    ):
+        parser.error(
+            "--ray_debug_layer requires --ray_debug_apd_group."
+        )
+
+    if args.ray_snapshot_interval <= 0:
+        parser.error("--ray_snapshot_interval must be positive.")
     
     if args.run_train_and_val:
         # Run TRAIN
         print("[INFO] Starting transformation for training data...")
         processor = WaymoDataProcessor(
-            args.config, args.load_dir, os.path.join(args.save_dir, "training"), args.sensor, 'train', save_outputs=args.save_outputs, selected_sensors=args.selected_sensors, num_proc=args.num_proc, transformation_mode=args.transformation_mode
+            args.config,
+            args.load_dir,
+            os.path.join(args.save_dir, "training"),
+            args.sensor,
+            'train',
+            save_outputs=args.save_outputs,
+            selected_sensors=args.selected_sensors,
+            num_proc=args.num_proc,
+            transformation_mode=args.transformation_mode,
+            ray_debug_output_dir=args.ray_debug_output_dir,
+            ray_snapshot_interval=args.ray_snapshot_interval,
+            ray_debug_apd_group=args.ray_debug_apd_group,
+            ray_debug_layer=args.ray_debug_layer,
+            inspect_all_apd_groups=args.inspect_all_apd_groups,
+            ray_debug_max_frames=args.ray_debug_max_frames,
         )
         processor.process_data()
 
@@ -825,7 +1029,21 @@ if __name__ == "__main__":
         # Run VAL
         print("[INFO] Starting transformation for validation data...")
         processor = WaymoDataProcessor(
-            args.config, args.load_dir, os.path.join(args.save_dir, "validation"), args.sensor, 'val', save_outputs=args.save_outputs, selected_sensors=args.selected_sensors,num_proc=args.num_proc, transformation_mode=args.transformation_mode
+            args.config,
+            args.load_dir,
+            os.path.join(args.save_dir, "validation"),
+            args.sensor,
+            'val',
+            save_outputs=args.save_outputs,
+            selected_sensors=args.selected_sensors,
+            num_proc=args.num_proc,
+            transformation_mode=args.transformation_mode,
+            ray_debug_output_dir=args.ray_debug_output_dir,
+            ray_snapshot_interval=args.ray_snapshot_interval,
+            ray_debug_apd_group=args.ray_debug_apd_group,
+            ray_debug_layer=args.ray_debug_layer,
+            inspect_all_apd_groups=args.inspect_all_apd_groups,
+            ray_debug_max_frames=args.ray_debug_max_frames,
         )
         processor.process_data()
     else:
@@ -849,6 +1067,11 @@ if __name__ == "__main__":
             selected_sensors=args.selected_sensors,
             num_proc=args.num_proc,
             transformation_mode=args.transformation_mode,
+            ray_debug_output_dir=args.ray_debug_output_dir,
+            ray_snapshot_interval=args.ray_snapshot_interval,
+            ray_debug_apd_group=args.ray_debug_apd_group,
+            ray_debug_layer=args.ray_debug_layer,
+            inspect_all_apd_groups=args.inspect_all_apd_groups,
+            ray_debug_max_frames=args.ray_debug_max_frames,
         )
         processor.process_data()
-
