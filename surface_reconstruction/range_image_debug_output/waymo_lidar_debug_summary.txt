@@ -1,0 +1,55 @@
+WAYMO LIDAR RANGE-IMAGE DEBUG SUMMARY
+================================================================================
+TFRecord: /data/waymo/raw_data/segment-898816942644052013_20_000_40_000_with_camera_labels.tfrecord
+Frame index: 0
+Timestamp [us]: 1547699174897109
+
+TOP
+---
+Range-image structure: return_1=64x2650x4, return_2=64x2650x4
+Beam source: explicit_calibration_array; beam count: 64
+Elevation: 2.326673 deg to -17.562902 deg; vertical FOV=19.889576 deg
+Extrinsic translation [m]: x=1.430000, y=0.000000, z=2.184000
+  return_1: valid=143330/169600 (84.51%), range=3.010..74.989 m, mean=17.972 m
+  return_2: valid=9294/169600 (5.48%), range=6.734..74.954 m, mean=28.329 m
+  combined: both=9294, R1-only=134036, R2-only=0, neither=26270, union=143330 (84.51%)
+
+FRONT
+-----
+Range-image structure: return_1=200x600x4, return_2=200x600x4
+Beam source: computed_from_min_max; beam count: 200
+Elevation: 29.700005 deg to -89.699997 deg; vertical FOV=119.400002 deg
+Extrinsic translation [m]: x=4.070000, y=0.000000, z=0.689000
+  return_1: valid=3639/120000 (3.03%), range=0.657..19.981 m, mean=3.738 m
+  return_2: valid=21/120000 (0.02%), range=1.418..19.457 m, mean=11.898 m
+  combined: both=7, R1-only=3632, R2-only=14, neither=116347, union=3653 (3.04%)
+
+SIDE_LEFT
+---------
+Range-image structure: return_1=200x600x4, return_2=200x600x4
+Beam source: computed_from_min_max; beam count: 200
+Elevation: 29.700005 deg to -89.699997 deg; vertical FOV=119.400002 deg
+Extrinsic translation [m]: x=3.245000, y=1.025000, z=0.979000
+  return_1: valid=3539/120000 (2.95%), range=0.930..19.959 m, mean=5.020 m
+  return_2: valid=88/120000 (0.07%), range=1.441..19.959 m, mean=15.751 m
+  combined: both=59, R1-only=3480, R2-only=29, neither=116432, union=3568 (2.97%)
+
+SIDE_RIGHT
+----------
+Range-image structure: return_1=200x600x4, return_2=200x600x4
+Beam source: computed_from_min_max; beam count: 200
+Elevation: 29.700005 deg to -89.699997 deg; vertical FOV=119.400002 deg
+Extrinsic translation [m]: x=3.245000, y=-1.025000, z=0.979000
+  return_1: valid=4823/120000 (4.02%), range=0.451..19.846 m, mean=4.421 m
+  return_2: valid=81/120000 (0.07%), range=1.132..19.992 m, mean=8.183 m
+  combined: both=30, R1-only=4793, R2-only=51, neither=115126, union=4874 (4.06%)
+
+REAR
+----
+Range-image structure: return_1=200x600x4, return_2=200x600x4
+Beam source: computed_from_min_max; beam count: 200
+Elevation: 29.700005 deg to -89.699997 deg; vertical FOV=119.400002 deg
+Extrinsic translation [m]: x=-1.155000, y=0.000000, z=0.464000
+  return_1: valid=3590/120000 (2.99%), range=0.379..19.967 m, mean=3.438 m
+  return_2: valid=161/120000 (0.13%), range=1.254..19.208 m, mean=3.969 m
+  combined: both=24, R1-only=3566, R2-only=137, neither=116273, union=3727 (3.11%)
