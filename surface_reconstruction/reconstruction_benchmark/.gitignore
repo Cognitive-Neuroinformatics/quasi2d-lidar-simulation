@@ -1,0 +1,39 @@
+# Waymo data
+data/raw/*
+data/extracted/*
+data/accumulated/*
+data/crops/*
+data/held_out/*
+
+# Keep directory structure
+!data/raw/.gitkeep
+!data/extracted/.gitkeep
+!data/accumulated/.gitkeep
+!data/crops/.gitkeep
+!data/held_out/.gitkeep
+
+# Generated results
+outputs/meshes/*
+outputs/metrics/*
+outputs/logs/*
+
+!outputs/meshes/.gitkeep
+!outputs/metrics/.gitkeep
+!outputs/logs/.gitkeep
+
+# Build products
+build/*
+cpp/**/build/
+*.o
+*.so
+*.a
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/

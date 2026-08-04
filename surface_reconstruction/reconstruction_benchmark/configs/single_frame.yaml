@@ -1,0 +1,77 @@
+experiment:
+  name: waymo_single_frame_open3d
+  seed: 42
+
+input:
+  tfrecord: "/home/samanti/git_repos/object_detection_dl/quasi2d-lidar-simulation/surface_reconstruction/reconstruction_benchmark/data/raw/segment-898816942644052013_20_000_40_000_with_camera_labels.tfrecord"
+  frame_index: 0
+
+  # only TOP LiDAR for now.
+  lidar_names:
+    - TOP
+
+  # only first return for now.
+  return_index: 0
+
+  include_intensity: true
+  include_elongation: false
+  include_no_label_zone: false
+
+crop:
+  enabled: true
+
+  # Vehicle-coordinate crop in metres.
+  x_min: -10.0
+  x_max: 50.0
+  y_min: -30.0
+  y_max: 30.0
+  z_min: -3.0
+  z_max: 5.0
+
+preprocessing:
+  remove_non_finite: true
+
+  voxel_downsample:
+    enabled: true
+    voxel_size: 0.05
+
+  statistical_outlier_removal:
+    enabled: true
+    nb_neighbors: 20
+    std_ratio: 2.0
+
+  normals:
+    radius: 0.50
+    max_nn: 100
+
+  orient_normals:
+    method: viewpoint
+    k: 50
+
+reconstruction:
+  poisson:
+    enabled: true
+    depth: 9
+    width: 0
+    scale: 1.1
+    linear_fit: false
+    density_quantile: 0.02
+
+  ball_pivoting:
+    enabled: true
+    radii:
+      - 0.08
+      - 0.16
+      - 0.32
+      - 0.64
+
+  alpha_shape:
+    enabled: false
+    alpha: 0.50
+
+output:
+  directory: "outputs"
+  save_raw_cloud: true
+  save_preprocessed_cloud: true
+  save_normals: true
+  save_metrics: true
