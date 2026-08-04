@@ -1,52 +1,55 @@
 experiment:
-  name: waymo_single_frame_open3d
+  name: waymo_multiframe_20_ref10_open3d
   seed: 42
 
 input:
   tfrecord: "/home/samanti/git_repos/object_detection_dl/quasi2d-lidar-simulation/surface_reconstruction/reconstruction_benchmark/data/raw/segment-898816942644052013_20_000_40_000_with_camera_labels.tfrecord"
-  frame_index: 0
 
-  # only TOP LiDAR for now.
   lidar_names:
     - TOP
 
-  # only first return for now.
   return_index: 0
 
-  include_intensity: true
+  include_intensity: false
   include_elongation: false
   include_no_label_zone: false
 
 crop:
-  enabled: false
+  enabled: true
 
-  # Vehicle-coordinate crop in metres.
-  x_min: -10.0
-  x_max: 50.0
+  # Fixed crop in reference-frame-10 coordinates.
+  x_min: -35.0
+  x_max: 35.0
   y_min: -30.0
   y_max: 30.0
   z_min: -3.0
-  z_max: 5.0
+  z_max: 6.0
 
 preprocessing:
   remove_non_finite: true
 
   voxel_downsample:
-    enabled: true
+    enabled: false
     voxel_size: 0.05
 
   statistical_outlier_removal:
     enabled: true
-    nb_neighbors: 20
+    nb_neighbors: 30
     std_ratio: 2.0
 
+  radius_outlier_removal:
+    enabled: true
+    radius: 0.15
+    min_neighbors: 3
+
   normals:
-    radius: 0.50
+    radius: 0.30
     max_nn: 100
 
   orient_normals:
-    method: viewpoint
-    k: 50
+    method: consistent_tangent_plane
+    k: 100
+
 
 reconstruction:
   poisson:
@@ -57,20 +60,27 @@ reconstruction:
     linear_fit: false
     density_quantile: 0.02
 
+
   ball_pivoting:
     enabled: true
+    # radii:
+    #   - 0.08
+    #   - 0.16
+    #   - 0.32
+    #   - 0.64
+
     radii:
-      - 0.08
+      - 0.06
+      - 0.10
       - 0.16
-      - 0.32
-      - 0.64
+      - 0.24
 
   alpha_shape:
     enabled: false
     alpha: 0.50
 
 output:
-  directory: "outputs"
+  directory: "outputs/multiframe_20_ref10"
   save_raw_cloud: true
   save_preprocessed_cloud: true
   save_normals: true
