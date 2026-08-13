@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 import open3d as o3d
 import matplotlib.pyplot as plt
+from datetime import datetime
 
 
 class PointCloudTransformer:
@@ -23,6 +24,319 @@ class PointCloudTransformer:
         # Just for Scala2 sensor - building it once and caching it
         self.az_deg = self.build_scala_azimuths_deg(include_edges=True, include_center_edges=True)  
 
+
+    @staticmethod
+    def scala2_polar_angle_deg(
+        azimuth_deg,
+        mirror_side,
+        apd_group,
+        layer,
+    ):
+        """
+        SCALA Gen2 Equation 1.
+
+        Parameters
+        ----------
+        azimuth_deg : float or np.ndarray
+            Azimuthal angle phi in degrees, in the sensor-local frame.
+        mirror_side : int
+            0 = upward-deflecting mirror, red in Figure 3.
+            1 = downward-deflecting mirror, black in Figure 3.
+        apd_group : int
+            APD group index 0..3, counted bottom to top.
+        layer : int
+            Layer index 0..3 inside the APD group, bottom to top.
+
+        Returns
+        -------
+        float or np.ndarray
+            Polar/elevation angle theta in degrees.
+        """
+        if mirror_side not in (0, 1):
+            raise ValueError("mirror_side must be 0 or 1")
+
+        if not 0 <= apd_group <= 3:
+            raise ValueError("apd_group must be in [0, 3]")
+
+        if not 0 <= layer <= 3:
+            raise ValueError("layer must be in [0, 3]")
+
+        phi = np.asarray(azimuth_deg, dtype=np.float64)
+
+        mirror_term = (
+            1.512e-8 * phi**3
+            - 5.152e-6 * phi**2
+            - 1.233e-3 * phi
+            + 0.1412
+        )
+
+        base_layer_angle = (
+            0.6025 * layer
+            + 2.564 * apd_group
+            - 4.749
+        )
+
+        mirror_sign = 1.0 if mirror_side == 0 else -1.0
+
+        return base_layer_angle + mirror_sign * mirror_term
+    
+    @staticmethod
+    def generate_scala2_base_azimuths_deg(
+        horizontal_angle_min=-66.5,
+        horizontal_angle_max=66.5,
+        inner_angle_min=-15.0,
+        inner_angle_max=15.0,
+        outer_increment=0.25,
+        inner_increment=0.125,
+    ):
+        """
+        Generate nominal SCALA Gen2 column azimuths.
+
+        Regions:
+        [horizontal_angle_min, inner_angle_min) -> outer increment
+        [inner_angle_min, inner_angle_max)      -> inner increment
+        [inner_angle_max, horizontal_angle_max] -> outer increment
+        """
+        left_outer = np.arange(
+            horizontal_angle_min,
+            inner_angle_min,
+            outer_increment,
+            dtype=np.float64,
+        )
+
+        center = np.arange(
+            inner_angle_min,
+            inner_angle_max,
+            inner_increment,
+            dtype=np.float64,
+        )
+
+        right_outer = np.arange(
+            inner_angle_max,
+            horizontal_angle_max + 1e-9,
+            outer_increment,
+            dtype=np.float64,
+        )
+
+        azimuths = np.concatenate(
+            (left_outer, center, right_outer)
+        )
+
+        # Protect against floating-point duplicates at region boundaries.
+        return np.unique(np.round(azimuths, decimals=8))
+    
+    @staticmethod
+    def quaternion_xyzw_to_rotation_matrix(
+        qx,
+        qy,
+        qz,
+        qw,
+    ):
+        """
+        Convert an xyzw quaternion into a 3x3 rotation matrix.
+
+        The returned matrix maps vectors from the sensor-local frame
+        into the parent/base_link frame, assuming the quaternion is the
+        sensor pose orientation expressed in base_link.
+        """
+        quaternion = np.asarray(
+            [qx, qy, qz, qw],
+            dtype=np.float64,
+        )
+
+        norm = np.linalg.norm(quaternion)
+
+        if norm < 1e-12:
+            raise ValueError("Quaternion norm is approximately zero")
+
+        qx, qy, qz, qw = quaternion / norm
+
+        return np.array(
+            [
+                [
+                    1.0 - 2.0 * (qy * qy + qz * qz),
+                    2.0 * (qx * qy - qz * qw),
+                    2.0 * (qx * qz + qy * qw),
+                ],
+                [
+                    2.0 * (qx * qy + qz * qw),
+                    1.0 - 2.0 * (qx * qx + qz * qz),
+                    2.0 * (qy * qz - qx * qw),
+                ],
+                [
+                    2.0 * (qx * qz - qy * qw),
+                    2.0 * (qy * qz + qx * qw),
+                    1.0 - 2.0 * (qx * qx + qy * qy),
+                ],
+            ],
+            dtype=np.float64,
+        )
+
+    def calculate_endpoints_vectorized_scala2(
+        self,
+        start_point_xyz,
+        dist_m,
+        mirror_side,
+        rotation_quaternion_xyzw,
+        horizontal_angle_min=-66.5,
+        horizontal_angle_max=66.5,
+        inner_angle_min=-15.0,
+        inner_angle_max=15.0,
+        outer_increment_deg=0.25,
+        inner_increment_deg=0.125,
+        apd_group_azimuth_offset_deg=0.0181,
+        apd_group_azimuth_sign=1.0,
+    ):
+        """
+        Generate SCALA Gen2 ray endpoints using:
+        - non-uniform horizontal resolution,
+        - APD-group azimuth staggering,
+        - Equation 1 polar angles,
+        - selected mirror side,
+        - full sensor quaternion orientation.
+
+        Returns
+        -------
+        endpoints_vehicle : np.ndarray, shape (N, 3)
+            Ray endpoints in the Waymo/base_link coordinate frame.
+
+        metadata : dict[str, np.ndarray]
+            Per-ray angular and channel metadata.
+        """
+        start_point_xyz = np.asarray(
+            start_point_xyz,
+            dtype=np.float64,
+        ).reshape(3)
+
+        qx, qy, qz, qw = rotation_quaternion_xyzw
+
+        rotation_sensor_to_vehicle = (
+            self.quaternion_xyzw_to_rotation_matrix(
+                qx=qx,
+                qy=qy,
+                qz=qz,
+                qw=qw,
+            )
+        )
+
+        base_azimuths_deg = (
+            self.generate_scala2_base_azimuths_deg(
+                horizontal_angle_min=horizontal_angle_min,
+                horizontal_angle_max=horizontal_angle_max,
+                inner_angle_min=inner_angle_min,
+                inner_angle_max=inner_angle_max,
+                outer_increment=outer_increment_deg,
+                inner_increment=inner_increment_deg,
+            )
+        )
+
+        directions_sensor = []
+        ray_azimuths_deg = []
+        ray_elevations_deg = []
+        ray_apd_groups = []
+        ray_layers = []
+        ray_column_ids = []
+
+        for column_id, base_phi_deg in enumerate(base_azimuths_deg):
+            for apd_group in range(4):
+                # The sign is configurable because the manual provides
+                # the 0.0181-degree magnitude but does not unambiguously
+                # establish the sign in our coordinate convention.
+                phi_deg = (
+                    base_phi_deg
+                    + apd_group_azimuth_sign
+                    * apd_group
+                    * apd_group_azimuth_offset_deg
+                )
+
+                for layer in range(4):
+                    theta_deg = float(
+                        self.scala2_polar_angle_deg(
+                            azimuth_deg=phi_deg,
+                            mirror_side=mirror_side,
+                            apd_group=apd_group,
+                            layer=layer,
+                        )
+                    )
+
+                    phi_rad = np.deg2rad(phi_deg)
+                    theta_rad = np.deg2rad(theta_deg)
+
+                    # Sensor-local convention:
+                    # x = forward, y = left, z = up.
+                    direction_sensor = np.array(
+                        [
+                            np.cos(theta_rad) * np.cos(phi_rad),
+                            np.cos(theta_rad) * np.sin(phi_rad),
+                            np.sin(theta_rad),
+                        ],
+                        dtype=np.float64,
+                    )
+
+                    directions_sensor.append(direction_sensor)
+                    ray_azimuths_deg.append(phi_deg)
+                    ray_elevations_deg.append(theta_deg)
+                    ray_apd_groups.append(apd_group)
+                    ray_layers.append(layer)
+                    ray_column_ids.append(column_id)
+
+        directions_sensor = np.asarray(
+            directions_sensor,
+            dtype=np.float64,
+        )
+
+        # Each row is a direction vector, therefore use R.T on the right.
+        directions_vehicle = (
+            directions_sensor
+            @ rotation_sensor_to_vehicle.T
+        )
+
+        # Numerical safety. Rotation should already preserve unit length.
+        direction_norms = np.linalg.norm(
+            directions_vehicle,
+            axis=1,
+            keepdims=True,
+        )
+
+        directions_vehicle = (
+            directions_vehicle
+            / np.maximum(direction_norms, 1e-12)
+        )
+
+        endpoints_vehicle = (
+            start_point_xyz[None, :]
+            + float(dist_m) * directions_vehicle
+        )
+
+        metadata = {
+            "azimuth_deg_sensor": np.asarray(
+                ray_azimuths_deg,
+                dtype=np.float32,
+            ),
+            "elevation_deg_sensor": np.asarray(
+                ray_elevations_deg,
+                dtype=np.float32,
+            ),
+            "apd_group": np.asarray(
+                ray_apd_groups,
+                dtype=np.int8,
+            ),
+            "layer": np.asarray(
+                ray_layers,
+                dtype=np.int8,
+            ),
+            "column_id": np.asarray(
+                ray_column_ids,
+                dtype=np.int32,
+            ),
+            "mirror_side": np.full(
+                len(directions_sensor),
+                mirror_side,
+                dtype=np.int8,
+            ),
+        }
+
+        return endpoints_vehicle.astype(np.float32), metadata
 
     def build_scala_azimuths_deg(self, include_edges=False, include_center_edges=False):
         """
@@ -55,57 +369,103 @@ class PointCloudTransformer:
         return az
 
 
-    def calculate_endpoints_vectorized_scala2(self, start_point_xyz, dist_m,
-                                      horizontal_angles_deg, vertical_angles_deg,
-                                      rotation_angle_deg):
+    # def calculate_endpoints_vectorized_scala2(self, start_point_xyz, dist_m,
+    #                                   horizontal_angles_deg, vertical_angles_deg,
+    #                                   rotation_angle_deg):
         
-        ha_vec = np.radians(horizontal_angles_deg + rotation_angle_deg)  # (H,)
-        va_vec = np.radians(vertical_angles_deg)                          # (V,)
+    #     ha_vec = np.radians(horizontal_angles_deg + rotation_angle_deg)  # (H,)
+    #     va_vec = np.radians(vertical_angles_deg)                          # (V,)
 
-        hmesh, vmesh = np.meshgrid(ha_vec, va_vec, indexing='xy')  # both (V, H)
+    #     hmesh, vmesh = np.meshgrid(ha_vec, va_vec, indexing='xy')  # both (V, H)
 
-        dx = dist_m * np.cos(vmesh) * np.cos(hmesh)  # (V, H)
-        dy = dist_m * np.cos(vmesh) * np.sin(hmesh)  # (V, H)
-        dz = dist_m * np.sin(vmesh)                  # (V, H)
+    #     dx = dist_m * np.cos(vmesh) * np.cos(hmesh)  # (V, H)
+    #     dy = dist_m * np.cos(vmesh) * np.sin(hmesh)  # (V, H)
+    #     dz = dist_m * np.sin(vmesh)                  # (V, H)
 
-        endpoints = np.stack([dx, dy, dz], axis=-1).reshape(-1, 3)
-        start_point_xyz = np.asarray(start_point_xyz, dtype=endpoints.dtype).reshape(1, 3)
-        return endpoints + start_point_xyz
+    #     endpoints = np.stack([dx, dy, dz], axis=-1).reshape(-1, 3)
+    #     start_point_xyz = np.asarray(start_point_xyz, dtype=endpoints.dtype).reshape(1, 3)
+    #     return endpoints + start_point_xyz
 
     def get_sensor_transforms(self, metadata, bev_padding=None):
         """
-        Create homogeneous transformation matrices for base_link <-> sensor frames.
+        Build homogeneous transforms between sensor and base_link.
 
-        Args:
-            metadata (dict): {
-                'start_point': (x, y, z),   # sensor position in base_link frame
-                'rotation_angle': yaw_deg   # sensor yaw angle in degrees
-            }
+        Returns
+        -------
+        T_baselink_from_sensor : (4,4)
+            sensor -> base_link
 
-        Returns:
-            T_baselink_from_sensor (np.ndarray): 4x4 matrix (base_link <- sensor)
-            T_sensor_from_baselink (np.ndarray): 4x4 matrix (sensor <- base_link)
+        T_sensor_from_baselink : (4,4)
+            base_link -> sensor
         """
-        # Extract pose info
-        sx, sy, sz = metadata['start_point']
-        yaw_deg = metadata['rotation_angle']
-        yaw_rad = math.radians(yaw_deg)
 
-        # Build homogeneous transform (rotation + translation)
-        T_baselink_from_sensor = tf_transformations.euler_matrix(0.0, 0.0, yaw_rad).astype(np.float32)
+        sx, sy, sz = np.asarray(
+            metadata["start_point"],
+            dtype=np.float64,
+        )
 
-        if bev_padding is not None:
-            T_baselink_from_sensor[0, 3] = np.float32(bev_padding - sx)
+        quaternion_xyzw = metadata.get(
+            "rotation_quaternion_xyzw"
+        )
+
+        T_baselink_from_sensor = np.eye(
+            4,
+            dtype=np.float64,
+        )
+
+        if quaternion_xyzw is not None:
+            qx, qy, qz, qw = quaternion_xyzw
+
+            R_baselink_from_sensor = (
+                self.quaternion_xyzw_to_rotation_matrix(
+                    qx=qx,
+                    qy=qy,
+                    qz=qz,
+                    qw=qw,
+                )
+            )
+
         else:
-            T_baselink_from_sensor[0, 3] = np.float32(sx)
+            yaw_deg = float(
+                metadata["rotation_angle"]
+            )
 
-        T_baselink_from_sensor[1, 3] = np.float32(sy)
-        T_baselink_from_sensor[2, 3] = np.float32(sz)
+            yaw_rad = np.deg2rad(
+                yaw_deg
+            )
 
-        # Inverse transform
-        T_sensor_from_baselink = np.linalg.inv(T_baselink_from_sensor).astype(np.float32)
+            R_baselink_from_sensor = (
+                tf_transformations.euler_matrix(
+                    0.0,
+                    0.0,
+                    yaw_rad,
+                )[:3, :3]
+            )
 
-        return T_baselink_from_sensor, T_sensor_from_baselink
+        T_baselink_from_sensor[:3, :3] = (
+            R_baselink_from_sensor
+        )
+
+        # For physical sensor geometry, do not use BEV padding.
+        # Keep legacy support only if explicitly requested.
+        if bev_padding is not None:
+            T_baselink_from_sensor[0, 3] = (
+                float(bev_padding) - sx
+            )
+        else:
+            T_baselink_from_sensor[0, 3] = sx
+
+        T_baselink_from_sensor[1, 3] = sy
+        T_baselink_from_sensor[2, 3] = sz
+
+        T_sensor_from_baselink = np.linalg.inv(
+            T_baselink_from_sensor
+        )
+
+        return (
+            T_baselink_from_sensor.astype(np.float32),
+            T_sensor_from_baselink.astype(np.float32),
+        )
     
     def transform_pc_to_sensor_frame(self, pointcloud, metadata, bev_padding=None):
 
@@ -160,30 +520,207 @@ class PointCloudTransformer:
         d_s = float(pi_s[3])
         return normal_s, d_s
 
-    def transform_point_cloud(self, sensor, original_pointcloud, start_point, dist, horizontal_angle_min, horizontal_angle_max, horizontal_rays, vertical_angles, rotation_angle):
+    def transform_point_cloud(
+        self,
+        sensor,
+        original_pointcloud,
+        start_point,
+        dist,
+        horizontal_angle_min,
+        horizontal_angle_max,
+        horizontal_rays=None,
+        vertical_angles=None,
+        rotation_angle=None,
+        rotation_quaternion_xyzw=None,
+        mirror_side=0,
+        scala2_common=None,
+    ):
+        pointcloud_non_ground = original_pointcloud
+        
+        
 
-        pointcloud_non_ground = original_pointcloud # ground removal functionality paused
-        start_voxel = self.compute_voxel_coordinate(np.asarray(start_point), self.voxel_size)
-        voxel_points_map = self.create_voxel_map(pointcloud_non_ground)
+        start_point = np.asarray(
+            start_point,
+            dtype=np.float32,
+        )
 
-        if sensor == 'scala2': # Non Uniform azimuth grid
-            
-            all_endpoints_vec = self.calculate_endpoints_vectorized_scala2(
-                start_point_xyz=start_point,
-                dist_m=dist,
-                horizontal_angles_deg=self.az_deg,
-                vertical_angles_deg=np.asarray(vertical_angles, dtype=np.float32),
-                rotation_angle_deg=rotation_angle  # yaw of the sensor
+        start_voxel = self.compute_voxel_coordinate(
+            start_point,
+            self.voxel_size,
+        )
+
+        voxel_points_map = self.create_voxel_map(
+            pointcloud_non_ground
+        )
+
+        ray_metadata = None
+
+        if sensor == "scala2":
+            if rotation_quaternion_xyzw is None:
+                raise ValueError(
+                    "SCALA2 requires rotation_quaternion_xyzw"
+                )
+
+            if scala2_common is None:
+                raise ValueError(
+                    "SCALA2 requires scala2_common configuration"
+                )
+
+            all_endpoints_vec, ray_metadata = (
+                self.calculate_endpoints_vectorized_scala2(
+                    start_point_xyz=start_point,
+                    dist_m=dist,
+                    mirror_side=mirror_side,
+                    rotation_quaternion_xyzw=(
+                        rotation_quaternion_xyzw
+                    ),
+                    horizontal_angle_min=horizontal_angle_min,
+                    horizontal_angle_max=horizontal_angle_max,
+                    inner_angle_min=scala2_common.get(
+                        "inner_angle_min",
+                        -15.0,
+                    ),
+                    inner_angle_max=scala2_common.get(
+                        "inner_angle_max",
+                        15.0,
+                    ),
+                    outer_increment_deg=scala2_common.get(
+                        "horizontal_increment_outer",
+                        0.25,
+                    ),
+                    inner_increment_deg=scala2_common.get(
+                        "horizontal_increment_inner",
+                        0.125,
+                    ),
+                    apd_group_azimuth_offset_deg=(
+                        scala2_common.get(
+                            "apd_group_azimuth_offset",
+                            0.0181,
+                        )
+                    ),
+                    apd_group_azimuth_sign=(
+                        scala2_common.get(
+                            "apd_group_azimuth_sign",
+                            1.0,
+                        )
+                    ),
+                )
             )
+
         else:
-            # Legacy: Uniform azimuth grid
-            all_endpoints_vec = self.calculate_endpoints_vectorized(start_point, dist, horizontal_angle_min, horizontal_angle_max, horizontal_rays, vertical_angles)
+            all_endpoints_vec = (
+                self.calculate_endpoints_vectorized(
+                    start_point=start_point,
+                    dist=dist,
+                    horizontal_angle_min=horizontal_angle_min,
+                    horizontal_angle_max=horizontal_angle_max,
+                    horizontal_rays=horizontal_rays,
+                    vertical_angles=vertical_angles,
+                )
+            )
+
+        # pointcloud_simulation = (
+        #     self.simulate_point_cloud_with_original_point(
+        #         start_point=start_point,
+        #         all_endpoints=all_endpoints_vec,
+        #         start_voxel=start_voxel,
+        #         voxel_points_map=voxel_points_map,
+        #     )
+        # )
         
-        pointcloud_simulation = self.simulate_point_cloud_with_original_point(start_point,all_endpoints_vec, start_voxel, voxel_points_map)
+        # debug mode
         
-        pointcloud_simulation = np.array(pointcloud_simulation)
+        pointcloud_simulation = (
+            self.simulate_point_cloud_with_original_point(
+                start_point=start_point,
+                all_endpoints=all_endpoints_vec,
+                start_voxel=start_voxel,
+                voxel_points_map=voxel_points_map,
+                ray_metadata=ray_metadata,
+                debug=False,
+            )
+        )
+
+        # self.print_ray_debug_summary(
+        #     debug_records,
+        #     ground_z_threshold=0.0,
+        # )
+
+        # self.print_ground_hits_by_vertical_angle(
+        #     debug_records,
+        #     ground_z_threshold=0.0,
+        # )
+
+       # Only for visualization and debugging purposes
+        # print("=" * 60)
+        # print("Point Cloud Simulation")
+        # print("=" * 60)
+
+        # print(f"Type: {type(pointcloud_simulation)}")
+        # print(f"Shape: {pointcloud_simulation.shape}")
+        # print(f"Dtype: {pointcloud_simulation.dtype}")
+        # print(f"Number of points: {len(pointcloud_simulation)}")
+
+
+        # # Create a unique identifier for this function call.
+        # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+        # file_identifier = (
+        #     f"{sensor}"
+        #     f"_mirror_{mirror_side}"
+        #     f"_{timestamp}"
+        # )
+
+
+        # base_save_dir = (
+        #     "/home/samanti/git_repos/object_detection_dl/"
+        #     "quasi2d-lidar-simulation/test_data_output/"
+        #     "visualizing_outputs"
+        # )
+
+        # save_dir_original = os.path.join(
+        #     base_save_dir,
+        #     "original",
+        # )
+
+        # save_dir_transformed = os.path.join(
+        #     base_save_dir,
+        #     "transformed",
+        # )
+
+        # os.makedirs(save_dir_original, exist_ok=True)
+        # os.makedirs(save_dir_transformed, exist_ok=True)
+
+
+        # original_save_path = os.path.join(
+        #     save_dir_original,
+        #     f"original_{file_identifier}.npy",
+        # )
+
+        # transformed_save_path = os.path.join(
+        #     save_dir_transformed,
+        #     f"pointcloud_simulation_{file_identifier}.npy",
+        # )
+
+
+        # np.save(
+        #     original_save_path,
+        #     np.asarray(pointcloud_non_ground),
+        # )
+
+        # np.save(
+        #     transformed_save_path,
+        #     np.asarray(pointcloud_simulation),
+        # )
+
+
+        # print(f"Saved original point cloud to: {original_save_path}")
+        # print(f"Saved simulated point cloud to: {transformed_save_path}")
         
-        return pointcloud_simulation
+        return np.asarray(
+            pointcloud_simulation,
+            dtype=np.float32,
+        ), ray_metadata
 
 
     def point_on_ray_at_same_distance(self, A, B, P):
@@ -268,60 +805,721 @@ class PointCloudTransformer:
         return best_idx, float(perp[best_local]), float(t[best_idx])
 
 
-    def simulate_point_cloud_with_original_point(self, start_point, all_endpoints, start_voxel, voxel_points_map):
-        
+    def simulate_point_cloud_with_original_point(
+        self,
+        start_point,
+        all_endpoints,
+        start_voxel,
+        voxel_points_map,
+        ray_metadata=None,
+        debug=False,
+        debug_ray_indices=None,
+        max_candidate_points_to_store=20,
+    ):
+        """
+        Simulate one LiDAR return per emitted ray.
+
+        For every ray, the first occupied traversed voxel that produces a valid
+        representative point is treated as the ray hit.
+
+        Parameters
+        ----------
+        start_point : array-like
+            LiDAR origin in the point-cloud coordinate frame.
+
+        all_endpoints : array-like, shape (N, 3)
+            Maximum-range endpoint for every emitted ray.
+
+        start_voxel : tuple
+            Voxel coordinate containing the LiDAR origin.
+
+        voxel_points_map : dict
+            Mapping:
+                voxel coordinate -> original points inside that voxel.
+
+        ray_metadata : optional
+            Metadata corresponding to each ray. Ideally contains horizontal and
+            vertical angles and any SCALA2-specific identifiers.
+
+        debug : bool
+            Whether to collect detailed ray-level debugging information.
+
+        debug_ray_indices : set[int] or None
+            Rays for which detailed candidate information should be stored.
+            None means all rays.
+
+        max_candidate_points_to_store : int
+            Limits stored candidate points per occupied voxel.
+        """
+
         pointcloud_simulation = []
         pointcloud_simulation_set = set()
+        debug_records = []
+        
+        
+        # Compact record of the point selected by each ray.
+        ray_hit_records = []
 
-        start_xyz = np.asarray(start_point, dtype=np.float32)
+        start_xyz = np.asarray(
+            start_point,
+            dtype=np.float32,
+        )
 
-        for end_xyz in all_endpoints:
-            end_xyz = np.asarray(end_xyz, dtype=np.float32)
+        all_endpoints = np.asarray(
+            all_endpoints,
+            dtype=np.float32,
+        )
 
-            end_voxel = self.compute_voxel_coordinate(end_xyz, self.voxel_size)
-            intersected_voxels = self.bresenham3D(start_voxel, end_voxel)
+        for ray_idx, end_xyz in enumerate(all_endpoints):
+            end_xyz = np.asarray(
+                end_xyz,
+                dtype=np.float32,
+            )
 
-            for voxel_coord in intersected_voxels:
+            should_debug_ray = (
+                debug
+                and (
+                    debug_ray_indices is None
+                    or ray_idx in debug_ray_indices
+                )
+            )
+
+            ray_vector = end_xyz - start_xyz
+            ray_length = float(np.linalg.norm(ray_vector))
+
+            if ray_length <= 1e-8:
+                if debug:
+                    debug_records.append({
+                        "ray_index": ray_idx,
+                        "metadata": (
+                            self.get_scala2_ray_metadata(
+                                ray_metadata=ray_metadata,
+                                ray_idx=ray_idx,
+                            )
+                            if ray_metadata is not None
+                            else None
+                        ),
+                        "origin": start_xyz.copy(),
+                        "endpoint": end_xyz.copy(),
+                        "status": "invalid_zero_length_ray",
+                        "selected_point": None,
+                    })
+                continue
+
+            ray_direction = ray_vector / ray_length
+            
+            
+            # Vehicle-frame elevation after quaternion rotation
+            
+            actual_elevation_deg_vehicle = float(
+                np.degrees(
+                    np.arctan2(
+                        ray_direction[2],
+                        np.linalg.norm(ray_direction[:2]),
+                    )
+                )
+            )
+
+            end_voxel = self.compute_voxel_coordinate(
+                end_xyz,
+                self.voxel_size,
+            )
+
+            intersected_voxels = self.bresenham3D(
+                start_voxel,
+                end_voxel,
+            )
+
+            ray_record = None
+
+            if debug:
+                ray_record = {
+                    "ray_index": ray_idx,
+                    "metadata": (
+                        self.get_scala2_ray_metadata(
+                            ray_metadata=ray_metadata,
+                            ray_idx=ray_idx,
+                        )
+                        if ray_metadata is not None
+                        else None
+                    ),
+                    "origin": start_xyz.copy(),
+                    "endpoint": end_xyz.copy(),
+                    "ray_direction": ray_direction.copy(),
+                    "ray_length": ray_length,
+                    "actual_elevation_deg_vehicle": actual_elevation_deg_vehicle,
+                    "start_voxel": tuple(start_voxel),
+                    "end_voxel": tuple(end_voxel),
+                    "number_of_traversed_voxels": len(
+                        intersected_voxels
+                    ),
+                    "traversed_voxels": (
+                        [tuple(v) for v in intersected_voxels]
+                        if should_debug_ray
+                        else None
+                    ),
+                    "occupied_voxels": [],
+                    "selected_voxel": None,
+                    "representative_original_point": None,
+                    "projected_point": None,
+                    "representative_distance_from_sensor": None,
+                    "projected_distance_from_sensor": None,
+                    "representative_perpendicular_distance": None,
+                    "projection_displacement": None,
+                    "status": "no_hit",
+                }
+
+            hit_found = False
+
+            for voxel_step, voxel_coord in enumerate(
+                intersected_voxels
+            ):
+                voxel_coord = tuple(voxel_coord)
+
                 if voxel_coord not in voxel_points_map:
                     continue
 
-                points_in_voxel = np.asarray(voxel_points_map[voxel_coord])
+                points_in_voxel = np.asarray(
+                    voxel_points_map[voxel_coord]
+                )
 
-                if points_in_voxel.ndim != 2 or points_in_voxel.shape[0] == 0:
+                occupied_voxel_record = None
+
+                if should_debug_ray:
+                    occupied_voxel_record = {
+                        "voxel_step": voxel_step,
+                        "voxel_coordinate": voxel_coord,
+                        "raw_shape": tuple(points_in_voxel.shape),
+                        "status": None,
+                        "candidate_points": None,
+                        "selected_candidate_index": None,
+                    }
+
+                if (
+                    points_in_voxel.ndim != 2
+                    or points_in_voxel.shape[0] == 0
+                ):
+                    if should_debug_ray:
+                        occupied_voxel_record["status"] = (
+                            "invalid_or_empty"
+                        )
+                        ray_record["occupied_voxels"].append(
+                            occupied_voxel_record
+                        )
                     continue
 
-                if points_in_voxel.shape[1] >= 3:
-                    P_xyz = points_in_voxel[:, :3]
-                else:
+                if points_in_voxel.shape[1] < 3:
+                    if should_debug_ray:
+                        occupied_voxel_record["status"] = (
+                            "fewer_than_three_coordinates"
+                        )
+                        ray_record["occupied_voxels"].append(
+                            occupied_voxel_record
+                        )
                     continue
 
-                best_idx, _, _ = self._pick_representative_point_on_ray(start_xyz, end_xyz, P_xyz)
+                P_xyz = points_in_voxel[:, :3]
+
+                (
+                    best_idx,
+                    best_perpendicular_distance,
+                    best_t_along_ray,
+                ) = self._pick_representative_point_on_ray(
+                    start_xyz,
+                    end_xyz,
+                    P_xyz,
+                )
+
+                if should_debug_ray:
+                    candidate_debug = (
+                        self._build_candidate_ray_debug(
+                            start_xyz=start_xyz,
+                            ray_direction=ray_direction,
+                            candidate_points=P_xyz,
+                        )
+                    )
+
+                    occupied_voxel_record["candidate_points"] = (
+                        candidate_debug[
+                            :max_candidate_points_to_store
+                        ]
+                    )
+
+                    occupied_voxel_record[
+                        "selected_candidate_index"
+                    ] = (
+                        None
+                        if best_idx is None
+                        else int(best_idx)
+                    )
+
+                    occupied_voxel_record[
+                        "best_perpendicular_distance"
+                    ] = (
+                        None
+                        if best_perpendicular_distance is None
+                        else float(best_perpendicular_distance)
+                    )
+
+                    occupied_voxel_record[
+                        "best_t_along_ray"
+                    ] = (
+                        None
+                        if best_t_along_ray is None
+                        else float(best_t_along_ray)
+                    )
+
+
                 if best_idx is None:
+                    if should_debug_ray:
+                        occupied_voxel_record["status"] = (
+                            "no_valid_representative"
+                        )
+                        ray_record["occupied_voxels"].append(
+                            occupied_voxel_record
+                        )
                     continue
 
                 rep = points_in_voxel[best_idx]
+                rep_xyz = np.asarray(
+                    rep[:3],
+                    dtype=np.float32,
+                )
 
-                rep_xyz = rep[:3]
-                projected_xyz = self.point_on_ray_at_same_distance(start_xyz, end_xyz, rep_xyz)
+                projected_xyz = (
+                    self.point_on_ray_at_same_distance(
+                        start_xyz,
+                        end_xyz,
+                        rep_xyz,
+                    )
+                )
+
+                projected_xyz = np.asarray(
+                    projected_xyz,
+                    dtype=np.float32,
+                )
 
                 if points_in_voxel.shape[1] >= 4:
                     intensity = float(rep[3])
                 else:
                     intensity = 0.0
- 
 
-                # just taking intensity info and not elongation as not available in our data
-                out = np.array([projected_xyz[0], projected_xyz[1], projected_xyz[2],
-                                intensity], dtype=np.float32)
+                out = np.array(
+                    [
+                        projected_xyz[0],
+                        projected_xyz[1],
+                        projected_xyz[2],
+                        intensity,
+                    ],
+                    dtype=np.float32,
+                )
 
-                key = (float(out[0]), float(out[1]), float(out[2]))
+                key = (
+                    float(out[0]),
+                    float(out[1]),
+                    float(out[2]),
+                )
+
+                rep_relative = rep_xyz - start_xyz
+
+                rep_projection_distance = float(
+                    np.dot(
+                        rep_relative,
+                        ray_direction,
+                    )
+                )
+
+                closest_point_on_ray = (
+                    start_xyz
+                    + rep_projection_distance * ray_direction
+                )
+
+                rep_perpendicular_distance = float(
+                    np.linalg.norm(
+                        rep_xyz - closest_point_on_ray
+                    )
+                )
+
+                rep_distance = float(
+                    np.linalg.norm(
+                        rep_xyz - start_xyz
+                    )
+                )
+
+                projected_distance = float(
+                    np.linalg.norm(
+                        projected_xyz - start_xyz
+                    )
+                )
+
+                projection_displacement = float(
+                    np.linalg.norm(
+                        projected_xyz - rep_xyz
+                    )
+                )
+
+                if should_debug_ray:
+                    occupied_voxel_record["status"] = "selected"
+                    ray_record["occupied_voxels"].append(
+                        occupied_voxel_record
+                    )
+
                 if key not in pointcloud_simulation_set:
                     pointcloud_simulation.append(out)
                     pointcloud_simulation_set.add(key)
 
-                break  
+                    if debug:
+                        ray_record["status"] = "hit_added"
+                else:
+                    if debug:
+                        ray_record["status"] = "hit_duplicate"
 
-        return np.asarray(pointcloud_simulation, dtype=np.float32)
+                if debug:
+                    ray_record["selected_voxel"] = voxel_coord
+                    ray_record["selected_voxel_step"] = voxel_step
+
+                    ray_record[
+                        "representative_original_point"
+                    ] = rep.copy()
+
+                    ray_record["projected_point"] = out.copy()
+
+                    ray_record[
+                        "representative_distance_from_sensor"
+                    ] = rep_distance
+
+                    ray_record[
+                        "projected_distance_from_sensor"
+                    ] = projected_distance
+
+                    ray_record[
+                        "representative_perpendicular_distance"
+                    ] = rep_perpendicular_distance
+
+                    ray_record[
+                        "projection_displacement"
+                    ] = projection_displacement
+
+                hit_found = True
+
+                # A ray must generate at most one hit.
+                break
+
+            if debug:
+                if not hit_found:
+                    ray_record["status"] = "no_hit"
+
+                debug_records.append(ray_record)
+
+        pointcloud_simulation = np.asarray(
+            pointcloud_simulation,
+            dtype=np.float32,
+        )
+
+        if debug:
+            return pointcloud_simulation, debug_records
+
+        return pointcloud_simulation
+    
+    
+    def _build_candidate_ray_debug(
+        self,
+        start_xyz,
+        ray_direction,
+        candidate_points,
+    ):
+        candidate_debug = []
+
+        start_xyz = np.asarray(
+            start_xyz,
+            dtype=np.float32,
+        )
+
+        ray_direction = np.asarray(
+            ray_direction,
+            dtype=np.float32,
+        )
+
+        ray_direction_norm = np.linalg.norm(
+            ray_direction
+        )
+
+        if ray_direction_norm <= 1e-8:
+            return candidate_debug
+
+        ray_direction = (
+            ray_direction / ray_direction_norm
+        )
+
+        for candidate_idx, point_xyz in enumerate(
+            candidate_points
+        ):
+            point_xyz = np.asarray(
+                point_xyz,
+                dtype=np.float32,
+            )
+
+            relative = point_xyz - start_xyz
+
+            projection_distance = float(
+                np.dot(
+                    relative,
+                    ray_direction,
+                )
+            )
+
+            closest_point = (
+                start_xyz
+                + projection_distance * ray_direction
+            )
+
+            perpendicular_distance = float(
+                np.linalg.norm(
+                    point_xyz - closest_point
+                )
+            )
+
+            sensor_distance = float(
+                np.linalg.norm(relative)
+            )
+
+            candidate_debug.append({
+                "candidate_index": candidate_idx,
+                "point_xyz": point_xyz.copy(),
+                "projection_distance": projection_distance,
+                "perpendicular_distance": (
+                    perpendicular_distance
+                ),
+                "sensor_distance": sensor_distance,
+                "in_front_of_sensor": (
+                    projection_distance > 0.0
+                ),
+            })
+
+        return candidate_debug
+    
+    def print_ray_debug_summary(
+        self,
+        debug_records,
+        ground_z_threshold=0.0,
+    ):
+        total_rays = len(debug_records)
+
+        hit_records = [
+            record
+            for record in debug_records
+            if record["status"] in {
+                "hit_added",
+                "hit_duplicate",
+            }
+        ]
+
+        no_hit_records = [
+            record
+            for record in debug_records
+            if record["status"] == "no_hit"
+        ]
+
+        ground_records = [
+            record
+            for record in hit_records
+            if record["projected_point"] is not None
+            and record["projected_point"][2]
+            <= ground_z_threshold
+        ]
+
+        print("\n========== RAY DEBUG SUMMARY ==========")
+        print(f"Total rays: {total_rays}")
+        print(f"Rays with hits: {len(hit_records)}")
+        print(f"Rays without hits: {len(no_hit_records)}")
+        print(f"Ground-like hits: {len(ground_records)}")
+
+        perpendicular_distances = [
+            record[
+                "representative_perpendicular_distance"
+            ]
+            for record in hit_records
+            if record[
+                "representative_perpendicular_distance"
+            ] is not None
+        ]
+
+        projection_displacements = [
+            record["projection_displacement"]
+            for record in hit_records
+            if record["projection_displacement"] is not None
+        ]
+
+        if perpendicular_distances:
+            print(
+                "Representative point-to-ray distance:"
+            )
+            print(
+                f"  minimum: "
+                f"{np.min(perpendicular_distances):.4f} m"
+            )
+            print(
+                f"  mean: "
+                f"{np.mean(perpendicular_distances):.4f} m"
+            )
+            print(
+                f"  maximum: "
+                f"{np.max(perpendicular_distances):.4f} m"
+            )
+
+        if projection_displacements:
+            print("Original-to-projected displacement:")
+            print(
+                f"  minimum: "
+                f"{np.min(projection_displacements):.4f} m"
+            )
+            print(
+                f"  mean: "
+                f"{np.mean(projection_displacements):.4f} m"
+            )
+            print(
+                f"  maximum: "
+                f"{np.max(projection_displacements):.4f} m"
+            )
+
+        print("=======================================\n")
+
+    def print_ground_hits_by_vertical_angle(
+        self,
+        debug_records,
+        ground_z_threshold=0.0,
+    ):
+        channel_groups = {}
+
+        for record in debug_records:
+            projected_point = record.get("projected_point")
+
+            if projected_point is None:
+                continue
+
+            projected_point = np.asarray(
+                projected_point,
+                dtype=np.float32,
+            )
+
+            # The fourth value is intensity, so inspect z at index 2.
+            if projected_point[2] > ground_z_threshold:
+                continue
+
+            metadata = record.get("metadata")
+
+            if metadata is None:
+                continue
+
+            sensor_elevation = float(
+                metadata["elevation_deg_sensor"]
+            )
+
+            vehicle_elevation = float(
+                record["actual_elevation_deg_vehicle"]
+            )
+
+            apd_group = int(metadata["apd_group"])
+            layer = int(metadata["layer"])
+            mirror_side = int(metadata["mirror_side"])
+
+            channel_key = (
+                mirror_side,
+                apd_group,
+                layer,
+            )
+
+            horizontal_range = float(
+                np.linalg.norm(
+                    projected_point[:2]
+                    - record["origin"][:2]
+                )
+            )
+
+            if channel_key not in channel_groups:
+                channel_groups[channel_key] = {
+                    "count": 0,
+                    "sensor_elevations": [],
+                    "vehicle_elevations": [],
+                    "horizontal_ranges": [],
+                    "ray_indices": [],
+                }
+
+            group = channel_groups[channel_key]
+
+            group["count"] += 1
+            group["sensor_elevations"].append(
+                sensor_elevation
+            )
+            group["vehicle_elevations"].append(
+                vehicle_elevation
+            )
+            group["horizontal_ranges"].append(
+                horizontal_range
+            )
+            group["ray_indices"].append(
+                record["ray_index"]
+            )
+
+        print(
+            "\n===== GROUND HITS BY SCALA2 CHANNEL ====="
+        )
+
+        if not channel_groups:
+            print(
+                "No simulated points were below the "
+                f"ground threshold z={ground_z_threshold:.3f} m."
+            )
+
+        for channel_key in sorted(channel_groups):
+            mirror_side, apd_group, layer = channel_key
+            group = channel_groups[channel_key]
+
+            sensor_elevations = np.asarray(
+                group["sensor_elevations"]
+            )
+
+            vehicle_elevations = np.asarray(
+                group["vehicle_elevations"]
+            )
+
+            horizontal_ranges = np.asarray(
+                group["horizontal_ranges"]
+            )
+
+            print(
+                f"\nMirror={mirror_side}, "
+                f"APD={apd_group}, "
+                f"layer={layer}"
+            )
+
+            print(
+                f"  Number of ground hits: "
+                f"{group['count']}"
+            )
+
+            print(
+                "  Sensor elevation: "
+                f"{sensor_elevations.min():+.4f} to "
+                f"{sensor_elevations.max():+.4f} deg"
+            )
+
+            print(
+                "  Vehicle elevation: "
+                f"{vehicle_elevations.min():+.4f} to "
+                f"{vehicle_elevations.max():+.4f} deg"
+            )
+
+            print(
+                "  Horizontal range: "
+                f"{horizontal_ranges.min():.3f} to "
+                f"{horizontal_ranges.max():.3f} m, "
+                f"mean={horizontal_ranges.mean():.3f} m"
+            )
+
+        print(
+            "\n========================================\n"
+        )
     
     def bresenham3D(self, start, end):
         """
@@ -458,40 +1656,102 @@ class PointCloudTransformer:
 
         return mean_point
 
-    def filter_bounding_boxes(self, frame, current_pointcloud, sensor_position, sensor_rotation_angle, horizontal_fov_min, horizontal_fov_max, threshold):
-        """Filter bounding boxes based on the transformed pointcloud FOV.
-        
-        Args:
-            frame (waymo_open_dataset.dataset_pb2.Frame): current waymo frame
-            pointcloud (np.ndarray): transformed point cloud to filter bounding boxes
-            threshold (int): threshold of how many points should be in a bbox
+    def filter_bounding_boxes(
+        self,
+        frame,
+        current_pointcloud,
+        sensor_metadata,
+        horizontal_fov_min,
+        horizontal_fov_max,
+        vertical_fov_min=None,
+        vertical_fov_max=None,
+        threshold=4,
+    ):
+        """
+        Filter Waymo boxes using the full sensor pose and the simulated
+        point cloud.
+
+        Boxes are first checked against the sensor-local angular FoV,
+        then retained only if they contain at least `threshold` points
+        from the simulated cloud.
         """
         filtered_bounding_boxes = []
-        for i, label in enumerate(frame.laser_labels):
-            if label.type in [1, 2, 4]:  # Filter für relevante Typen
-                box_data = {
-                    'center': np.array([label.box.center_x, label.box.center_y, label.box.center_z]),
-                    'dimensions': np.array([label.box.length, label.box.width, label.box.height]),
-                    'orientation': tf_transformations.quaternion_from_euler(0, 0, label.box.heading),
-                    'heading': label.box.heading,
-                    'velocity': [label.metadata.speed_x, label.metadata.speed_y, label.metadata.speed_z],  
-                    'acceleration': [label.metadata.accel_x, label.metadata.accel_y, label.metadata.accel_z], 
-                    'type': label.type,
-                    'color': self.get_label_color(label.type),
-                    'track_id': label.id,
-                    'num_lidar_points_in_box': label.num_lidar_points_in_box,  # original points
-                    'difficulty': label.detection_difficulty_level,
-                    'tracking_difficulty': label.tracking_difficulty_level,
-                }
 
-                # additional check if the bounding box is within the sensors FOV
-                if not self.is_bounding_box_in_sensor_fov(box_data, sensor_position, sensor_rotation_angle, horizontal_fov_min, horizontal_fov_max):
-                    continue
+        for label in frame.laser_labels:
+            if label.type not in (1, 2, 4):
+                continue
 
-                points_in_box = self.box_containing_points(box_data, current_pointcloud)
-                if points_in_box >= threshold:
-                    box_data['num_lidar_points_in_box_filtered'] = points_in_box  # filtered points
-                    filtered_bounding_boxes.append(box_data)
+            box_data = {
+                "center": np.array(
+                    [
+                        label.box.center_x,
+                        label.box.center_y,
+                        label.box.center_z,
+                    ],
+                    dtype=np.float64,
+                ),
+                "dimensions": np.array(
+                    [
+                        label.box.length,
+                        label.box.width,
+                        label.box.height,
+                    ],
+                    dtype=np.float64,
+                ),
+                "orientation": (
+                    tf_transformations.quaternion_from_euler(
+                        0.0,
+                        0.0,
+                        label.box.heading,
+                    )
+                ),
+                "heading": label.box.heading,
+                "velocity": [
+                    label.metadata.speed_x,
+                    label.metadata.speed_y,
+                    label.metadata.speed_z,
+                ],
+                "acceleration": [
+                    label.metadata.accel_x,
+                    label.metadata.accel_y,
+                    label.metadata.accel_z,
+                ],
+                "type": label.type,
+                "color": self.get_label_color(label.type),
+                "track_id": label.id,
+                "num_lidar_points_in_box": (
+                    label.num_lidar_points_in_box
+                ),
+                "difficulty": (
+                    label.detection_difficulty_level
+                ),
+                "tracking_difficulty": (
+                    label.tracking_difficulty_level
+                ),
+            }
+
+            if not self.is_bounding_box_in_sensor_fov(
+                box_data=box_data,
+                sensor_metadata=sensor_metadata,
+                horizontal_fov_min=horizontal_fov_min,
+                horizontal_fov_max=horizontal_fov_max,
+                vertical_fov_min=vertical_fov_min,
+                vertical_fov_max=vertical_fov_max,
+            ):
+                continue
+
+            points_in_box = self.box_containing_points(
+                box_data,
+                current_pointcloud,
+            )
+
+            if points_in_box >= threshold:
+                box_data[
+                    "num_lidar_points_in_box_filtered"
+                ] = points_in_box
+
+                filtered_bounding_boxes.append(box_data)
+
         return filtered_bounding_boxes
     
     def box_containing_points(self, box_data, point_cloud):
@@ -509,21 +1769,113 @@ class PointCloudTransformer:
         half_size = box_data['dimensions'] / 2
         return all(-half_size[i] <= point_rot[i] <= half_size[i] for i in range(3))
 
-    def is_bounding_box_in_sensor_fov(self, box_data, sensor_position, sensor_rotation_angle, horizontal_fov_min, horizontal_fov_max):
-        # sensor to bounding box center
-        sensor_to_box = box_data['center'][:2] - np.array(sensor_position[:2])
-        # angle from sensor to box in world frame
-        angle_to_box_world = np.degrees(np.arctan2(sensor_to_box[1], sensor_to_box[0]))
-        # calculate minimal angular difference (normalize to [-180, 180])
-        angle_diff = (angle_to_box_world - sensor_rotation_angle + 180) % 360 - 180
-        # calculate half of the sensor horizontal FOV
-        half_fov = (horizontal_fov_max - horizontal_fov_min) / 2
-        # cases where FOV spans over 360 or -180/180 boundaries
-        if half_fov < 0:
-            half_fov += 360
-        in_fov = abs(angle_diff) <= half_fov
-        return in_fov
+    def is_bounding_box_in_sensor_fov(
+        self,
+        box_data,
+        sensor_metadata,
+        horizontal_fov_min,
+        horizontal_fov_max,
+        vertical_fov_min=None,
+        vertical_fov_max=None,
+    ):
+        """
+        Check whether the box center lies inside the sensor-local FoV.
 
+        The box center is originally expressed in the Waymo base-link
+        frame. It is transformed into the sensor frame using the full
+        translation and quaternion.
+        """
+        center_baselink = np.asarray(
+            box_data["center"],
+            dtype=np.float64,
+        ).reshape(3)
+
+        sensor_position = np.asarray(
+            sensor_metadata["start_point"],
+            dtype=np.float64,
+        ).reshape(3)
+
+        quaternion_xyzw = sensor_metadata.get(
+            "rotation_quaternion_xyzw"
+        )
+
+        if quaternion_xyzw is not None:
+            qx, qy, qz, qw = quaternion_xyzw
+
+            R_baselink_from_sensor = (
+                self.quaternion_xyzw_to_rotation_matrix(
+                    qx=qx,
+                    qy=qy,
+                    qz=qz,
+                    qw=qw,
+                )
+            )
+        else:
+            # Legacy yaw-only sensor support.
+            yaw_rad = np.deg2rad(
+                sensor_metadata["rotation_angle"]
+            )
+
+            R_baselink_from_sensor = (
+                tf_transformations.euler_matrix(
+                    0.0,
+                    0.0,
+                    yaw_rad,
+                )[:3, :3]
+            )
+
+        # Column-vector form:
+        # p_sensor = R^T (p_baselink - t)
+        center_sensor = (
+            R_baselink_from_sensor.T
+            @ (center_baselink - sensor_position)
+        )
+
+        x_sensor, y_sensor, z_sensor = center_sensor
+
+        # Reject boxes behind the sensor.
+        if x_sensor <= 0.0:
+            return False
+
+        azimuth_deg = np.rad2deg(
+            np.arctan2(y_sensor, x_sensor)
+        )
+
+        horizontal_distance = np.hypot(
+            x_sensor,
+            y_sensor,
+        )
+
+        elevation_deg = np.rad2deg(
+            np.arctan2(
+                z_sensor,
+                horizontal_distance,
+            )
+        )
+
+        in_horizontal_fov = (
+            horizontal_fov_min
+            <= azimuth_deg
+            <= horizontal_fov_max
+        )
+
+        if not in_horizontal_fov:
+            return False
+
+        if (
+            vertical_fov_min is not None
+            and elevation_deg < vertical_fov_min
+        ):
+            return False
+
+        if (
+            vertical_fov_max is not None
+            and elevation_deg > vertical_fov_max
+        ):
+            return False
+
+        return True
+    
     def rotate_vector(self, vector, quaternion):
         # rotate the vector by the given quaternion
         rotated_vector = tf_transformations.quaternion_multiply(
@@ -540,6 +1892,36 @@ class PointCloudTransformer:
             return [0.0, 0.0, 1.0]
         elif label_type == 4: # cyclist
             return [0.0, 0.5, 0.5]
+        
+        
+    def get_scala2_ray_metadata(
+        self,
+        ray_metadata,
+        ray_idx,
+    ):
+        if ray_metadata is None:
+            return None
+
+        return {
+            "azimuth_deg_sensor": float(
+                ray_metadata["azimuth_deg_sensor"][ray_idx]
+            ),
+            "elevation_deg_sensor": float(
+                ray_metadata["elevation_deg_sensor"][ray_idx]
+            ),
+            "apd_group": int(
+                ray_metadata["apd_group"][ray_idx]
+            ),
+            "layer": int(
+                ray_metadata["layer"][ray_idx]
+            ),
+            "column_id": int(
+                ray_metadata["column_id"][ray_idx]
+            ),
+            "mirror_side": int(
+                ray_metadata["mirror_side"][ray_idx]
+            ),
+        }
 
 
 

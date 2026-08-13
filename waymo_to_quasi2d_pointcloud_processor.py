@@ -117,7 +117,19 @@ class WaymoDataProcessor:
             frame.ParseFromString(bytearray(data.numpy()))
 
             original_pointcloud = self.extract_point_cloud(frame)
-            transformed_pointclouds, transformation_metadata = self.transform_point_clouds(original_pointcloud)
+            if self.sensor == "scala2":
+                # 0 = mirror up, 1 = mirror down
+                mirror_side = frame_index % 2
+            else:
+                mirror_side = None
+
+            transformed_pointclouds, transformation_metadata = (
+                self.transform_point_clouds(
+                    original_pointcloud=original_pointcloud,
+                    mirror_side=mirror_side,
+                )
+            )
+
             if not any(pc.size > 0 for pc in transformed_pointclouds):
                 continue
             else:
@@ -129,35 +141,113 @@ class WaymoDataProcessor:
                     raise ValueError(f"Unknown transformation_mode: {self.transformation_mode}")
 
 
-    def transform_point_clouds(self, original_pointcloud):
+    
+    def transform_point_clouds(
+        self,
+        original_pointcloud,
+        mirror_side=None,
+    ):
+        """
+        Simulate the point cloud for every selected virtual sensor.
 
-        ## This function bypasses the missing sensor logic. currently implemented in PC for swifter calculations
+        For SCALA2:
+            mirror_side = 0 -> upward-deflecting mirror
+            mirror_side = 1 -> downward-deflecting mirror
+        """
+        if self.sensor == "scala2":
+            if mirror_side not in (0, 1):
+                raise ValueError(
+                    "For scala2, mirror_side must be 0 or 1. "
+                    f"Received: {mirror_side}"
+                )
+        else:
+            mirror_side = None
+
         params = self.get_transformation_params()
+
         transformed_pointclouds = []
         transformation_metadata = []
-        
+
         for param_set in params:
-            sensor_name, start_point, distance, horizontal_angle_min, horizontal_angle_max, horizontal_rays, horizontal_increment, vertical_angles, rotation_angle = param_set
-            transformed_pointcloud = self.transformer.transform_point_cloud(
-                self.sensor,
-                original_pointcloud,
-                start_point,
-                distance,
-                horizontal_angle_min,
-                horizontal_angle_max,
-                horizontal_rays,
-                vertical_angles,
-                rotation_angle
+            sensor_name = param_set["sensor_name"]
+            start_point = param_set["start_point"]
+            distance = param_set["distance"]
+
+            horizontal_angle_min = (
+                param_set["horizontal_angle_min"]
             )
-            transformed_pointclouds.append(transformed_pointcloud)
-            # metadata for transforming multiple sensors in BEV processing
-            transformation_metadata.append({
+            horizontal_angle_max = (
+                param_set["horizontal_angle_max"]
+            )
+
+            horizontal_rays = param_set["horizontal_rays"]
+            vertical_angles = param_set["vertical_angles"]
+            rotation_angle = param_set["rotation_angle"]
+            rotation_quaternion_xyzw = (
+                param_set["rotation_quaternion_xyzw"]
+            )
+
+            if self.sensor == "scala2":
+                transformed_pointcloud, ray_metadata = (
+                    self.transformer.transform_point_cloud(
+                        sensor=self.sensor,
+                        original_pointcloud=original_pointcloud,
+                        start_point=start_point,
+                        dist=distance,
+                        horizontal_angle_min=horizontal_angle_min,
+                        horizontal_angle_max=horizontal_angle_max,
+                        horizontal_rays=None,
+                        vertical_angles=None,
+                        rotation_angle=None,
+                        rotation_quaternion_xyzw=(
+                            rotation_quaternion_xyzw
+                        ),
+                        mirror_side=mirror_side,
+                        scala2_common=param_set["common"],
+                    )
+                )
+
+            else:
+                transformed_pointcloud, ray_metadata = (
+                    self.transformer.transform_point_cloud(
+                        sensor=self.sensor,
+                        original_pointcloud=original_pointcloud,
+                        start_point=start_point,
+                        dist=distance,
+                        horizontal_angle_min=horizontal_angle_min,
+                        horizontal_angle_max=horizontal_angle_max,
+                        horizontal_rays=horizontal_rays,
+                        vertical_angles=vertical_angles,
+                        rotation_angle=rotation_angle,
+                        rotation_quaternion_xyzw=None,
+                        mirror_side=None,
+                        scala2_common=None,
+                    )
+                )
+
+            transformed_pointcloud = np.asarray(
+                transformed_pointcloud,
+                dtype=np.float32,
+            )
+
+            transformed_pointclouds.append(
+                transformed_pointcloud
+            )
+
+            metadata = {
                 "sensor_name": sensor_name,
                 "start_point": start_point,
                 "rotation_angle": rotation_angle,
+                "rotation_quaternion_xyzw": (
+                    rotation_quaternion_xyzw
+                ),
                 "horizontal_fov_min": horizontal_angle_min,
                 "horizontal_fov_max": horizontal_angle_max,
-            })
+                "mirror_side": mirror_side,
+                "ray_metadata": ray_metadata,
+            }
+
+            transformation_metadata.append(metadata)
 
         return transformed_pointclouds, transformation_metadata
 
@@ -191,18 +281,17 @@ class WaymoDataProcessor:
             
             npy_file_name = f"{sequence_name}_{sensor_name}_{frame_index:03d}.npy"
             img_file_name = f"{sequence_name}_{sensor_name}_{frame_index:03d}.png"
-            yaw_deg = metadata["rotation_angle"]
-
+            
             filtered_bounding_boxes = self.transformer.filter_bounding_boxes(
-                frame,
-                transformed_pointcloud,
-                sensor_position=metadata["start_point"],
-                sensor_rotation_angle=yaw_deg,
+                frame=frame,
+                current_pointcloud=transformed_pointcloud,
+                sensor_metadata=metadata,
                 horizontal_fov_min=metadata["horizontal_fov_min"],
                 horizontal_fov_max=metadata["horizontal_fov_max"],
-                threshold=4
+                vertical_fov_min=-5.5,
+                vertical_fov_max=5.5,
+                threshold=4,
             )
-
 
             # for 1f, 2f and 4f point clouds, directory creation:
             points_dir_1f = sensor_dir / "points_concat_1f"
@@ -277,7 +366,7 @@ class WaymoDataProcessor:
                 buf = deque(maxlen=3)
                 self.previous_buffer[i] = buf
 
-            # 4) precompute sensor transform for THIS frame
+            # 4) precompute sensor transform for this frame
             yaw_rad = np.deg2rad(metadata["rotation_angle"])
             T_baselink_from_sensor, T_sensor_from_baselink = self.transformer.get_sensor_transforms(metadata, self.bev_padding)
 
@@ -447,7 +536,7 @@ class WaymoDataProcessor:
                     )
 
 
-            # 6) update history buffer (store ORIGINAL baselink-frame pc + BASELINK annos)
+            # 6) update history buffer 
             buf.append({
                 "pose": vehicle_pose,
                 "pc": pc_curr_baselink.copy(),
@@ -491,7 +580,8 @@ class WaymoDataProcessor:
 
         if self.sensor not in sensors_cfg:
             raise ValueError(
-                f"Unknown sensor '{self.sensor}'. Available sensors: {list(sensors_cfg.keys())}"
+                f"Unknown sensor '{self.sensor}'. "
+                f"Available sensors: {list(sensors_cfg.keys())}"
             )
 
         sensor_cfg = sensors_cfg[self.sensor]
@@ -501,32 +591,68 @@ class WaymoDataProcessor:
         params = []
 
         for sensor_pos in sensor_positions:
-            
             sensor_name = sensor_pos["name"]
-            
+
             if (
                 self.selected_sensors is not None
                 and sensor_name not in self.selected_sensors
             ):
                 continue
-            
-            start_point = tuple(sensor_pos["start_point"])
-            rotation_angle = float(sensor_pos["rotation_angle"])
 
-            horizontal_angle_min = common["horizontal_angle_min"] + rotation_angle
-            horizontal_angle_max = common["horizontal_angle_max"] + rotation_angle
+            param_set = {
+                "sensor_name": sensor_name,
+                "start_point": tuple(sensor_pos["start_point"]),
+                "distance": float(common["distance"]),
+                "horizontal_angle_min": float(
+                    common["horizontal_angle_min"]
+                ),
+                "horizontal_angle_max": float(
+                    common["horizontal_angle_max"]
+                ),
+                "common": common,
+            }
 
-            params.append((
-                sensor_pos["name"],
-                start_point,
-                common["distance"],
-                horizontal_angle_min,
-                horizontal_angle_max,
-                common["horizontal_rays"],
-                common["horizontal_increment"],
-                common["vertical_angles"],
-                rotation_angle
-            ))
+            if self.sensor == "scala2":
+                quaternion_xyzw = (
+                    float(sensor_pos["rotation_angle_x"]),
+                    float(sensor_pos["rotation_angle_y"]),
+                    float(sensor_pos["rotation_angle_z"]),
+                    float(sensor_pos["rotation_angle_w"]),
+                )
+
+                param_set.update({
+                    "rotation_quaternion_xyzw": quaternion_xyzw,
+                    "rotation_angle": (
+                        self.quaternion_xyzw_to_yaw_deg(
+                            quaternion_xyzw
+                        )
+                    ),
+                    "horizontal_rays": None,
+                    "horizontal_increment": None,
+                    "vertical_angles": None,
+                })
+
+            else:
+                rotation_angle = float(
+                    sensor_pos["rotation_angle"]
+                )
+
+                param_set.update({
+                    "rotation_quaternion_xyzw": None,
+                    "rotation_angle": rotation_angle,
+                    "horizontal_rays": int(
+                        common["horizontal_rays"]
+                    ),
+                    "horizontal_increment": (
+                        common["horizontal_increment"]
+                    ),
+                    "vertical_angles": np.asarray(
+                        common["vertical_angles"],
+                        dtype=np.float32,
+                    ),
+                })
+
+            params.append(param_set)
 
         return params
     
@@ -635,6 +761,29 @@ class WaymoDataProcessor:
                 intensity.append(intensity_tensor.numpy()[:, 1])
 
         return points, cp_points, intensity    
+    
+    
+    @staticmethod
+    def quaternion_xyzw_to_yaw_deg(quaternion_xyzw):
+        qx, qy, qz, qw = np.asarray(
+            quaternion_xyzw,
+            dtype=np.float64,
+        )
+
+        norm = np.linalg.norm([qx, qy, qz, qw])
+        if norm < 1e-12:
+            raise ValueError("Quaternion norm is zero")
+
+        qx, qy, qz, qw = (
+            np.asarray([qx, qy, qz, qw]) / norm
+        )
+
+        sin_yaw = 2.0 * (qw * qz + qx * qy)
+        cos_yaw = 1.0 - 2.0 * (qy * qy + qz * qz)
+
+        return float(
+            np.rad2deg(np.arctan2(sin_yaw, cos_yaw))
+        )
     
     
     
