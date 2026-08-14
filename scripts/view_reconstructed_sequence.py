@@ -1,6 +1,7 @@
 import argparse
 import glob
 import os
+import time
 
 import numpy as np
 import open3d as o3d
@@ -27,10 +28,7 @@ def main():
     parser.add_argument(
         "--input-dir",
         required=True,
-        help=(
-            "Directory containing frame_000.npz, "
-            "frame_001.npz, ..."
-        ),
+        help="Directory containing frame_000.npz, frame_001.npz, ...",
     )
 
     parser.add_argument(
@@ -50,7 +48,7 @@ def main():
         "--camera-file",
         type=str,
         default="camera_view.json",
-        help="File used to save/load the Open3D camera.",
+        help="Saved Open3D camera parameters.",
     )
 
     args = parser.parse_args()
@@ -70,8 +68,12 @@ def main():
 
     if not frame_files:
         raise RuntimeError(
-            f"No frame_*.npz files found in: "
-            f"{args.input_dir}"
+            f"No frame_*.npz files found in: {args.input_dir}"
+        )
+
+    if not os.path.exists(args.camera_file):
+        raise FileNotFoundError(
+            f"Camera file not found: {args.camera_file}"
         )
 
     os.makedirs(
@@ -80,33 +82,16 @@ def main():
     )
 
     print(f"Found {len(frame_files)} frames")
-    print()
-    print("Controls:")
-    print("  N / Right arrow : next frame")
-    print("  B / Left arrow  : previous frame")
-    print("  C               : save current camera")
-    print("  L               : load saved camera")
-    print("  S               : save current frame screenshot")
-    print("  Q               : quit")
-    print()
+    print(f"Camera file: {args.camera_file}")
+    print(f"Output directory: {args.save_dir}")
 
     # ---------------------------------------------------------
     # Initial frame
     # ---------------------------------------------------------
 
-    current_idx = 0
-
     xyz = load_frame(
-        frame_files[current_idx]
+        frame_files[0]
     )
-
-    print(
-        f"Initial frame has {len(xyz):,} points"
-    )
-
-    # ---------------------------------------------------------
-    # Point cloud
-    # ---------------------------------------------------------
 
     pcd = o3d.geometry.PointCloud()
 
@@ -116,8 +101,13 @@ def main():
         )
     )
 
+    # Blue point cloud
+    pcd.paint_uniform_color(
+        [0.0, 0.0, 1.0]
+    )
+
     # ---------------------------------------------------------
-    # Sensor coordinate frame
+    # Coordinate frame
     # ---------------------------------------------------------
 
     coordinate_frame = (
@@ -131,16 +121,13 @@ def main():
     # Visualizer
     # ---------------------------------------------------------
 
-    vis = (
-        o3d.visualization.VisualizerWithKeyCallback()
-    )
+    vis = o3d.visualization.Visualizer()
 
     vis.create_window(
-        window_name=(
-            "Scala2 reconstructed raycast sequence"
-        ),
+        window_name="Scala2 batch renderer",
         width=1600,
         height=900,
+        visible=True,
     )
 
     vis.add_geometry(
@@ -153,264 +140,110 @@ def main():
         reset_bounding_box=False,
     )
 
-    render_option = (
-        vis.get_render_option()
-    )
+    render_option = vis.get_render_option()
 
     render_option.point_size = (
         args.point_size
     )
 
     render_option.point_color_option = (
-        o3d.visualization.PointColorOption.ZCoordinate
+        o3d.visualization.PointColorOption.Color
     )
 
     # ---------------------------------------------------------
-    # Frame update
+    # Load saved camera
     # ---------------------------------------------------------
 
-    def update_frame(new_idx):
-        nonlocal current_idx
-
-        new_idx = max(
-            0,
-            min(
-                new_idx,
-                len(frame_files) - 1,
-            ),
+    camera_params = (
+        o3d.io.read_pinhole_camera_parameters(
+            args.camera_file
         )
+    )
 
-        if new_idx == current_idx:
-            return False
+    view_control = (
+        vis.get_view_control()
+    )
 
-        current_idx = new_idx
+    view_control.convert_from_pinhole_camera_parameters(
+        camera_params,
+        allow_arbitrary=True,
+    )
 
-        path = frame_files[
-            current_idx
-        ]
+    vis.poll_events()
+    vis.update_renderer()
 
-        xyz_new = load_frame(
+    print()
+    print("Loaded camera:")
+    print(camera_params.extrinsic)
+    print()
+
+    # ---------------------------------------------------------
+    # Render all frames automatically
+    # ---------------------------------------------------------
+
+    for idx, path in enumerate(frame_files):
+
+        xyz = load_frame(
             path
         )
 
+        # Update points
         pcd.points = (
             o3d.utility.Vector3dVector(
-                xyz_new
+                xyz
             )
+        )
+
+        # Repaint every new frame blue
+        pcd.paint_uniform_color(
+            [0.0, 0.0, 1.0]
         )
 
         vis.update_geometry(
             pcd
         )
 
-        print(
-            f"Frame {current_idx:03d} | "
-            f"{os.path.basename(path)} | "
-            f"{len(xyz_new):,} points"
-        )
-
-        # Important:
-        # no reset_bounding_box here.
-        # Current camera remains unchanged.
-
-        return False
-
-    # ---------------------------------------------------------
-    # Camera save
-    # ---------------------------------------------------------
-
-    def save_camera(vis_obj):
-
-        view_control = (
-            vis_obj.get_view_control()
-        )
-
-        camera_params = (
-            view_control
-            .convert_to_pinhole_camera_parameters()
-        )
-
-        success = (
-            o3d.io.write_pinhole_camera_parameters(
-                args.camera_file,
-                camera_params,
-            )
-        )
-
-        if success:
-            print()
-            print(
-                "Saved camera:"
-            )
-            print(
-                args.camera_file
-            )
-
-            print(
-                "Camera extrinsic:"
-            )
-            print(
-                camera_params.extrinsic
-            )
-
-        else:
-            print(
-                "Failed to save camera."
-            )
-
-        return False
-
-    # ---------------------------------------------------------
-    # Camera load
-    # ---------------------------------------------------------
-
-    def load_camera(vis_obj):
-
-        if not os.path.exists(
-            args.camera_file
-        ):
-            print(
-                f"Camera file does not exist: "
-                f"{args.camera_file}"
-            )
-            return False
-
-        camera_params = (
-            o3d.io.read_pinhole_camera_parameters(
-                args.camera_file
-            )
-        )
-
-        view_control = (
-            vis_obj.get_view_control()
-        )
-
+        # Reapply camera to guarantee that all frames
+        # are rendered from exactly the same viewpoint.
         view_control.convert_from_pinhole_camera_parameters(
             camera_params,
             allow_arbitrary=True,
         )
 
-        vis_obj.poll_events()
-        vis_obj.update_renderer()
+        # Render updated geometry
+        vis.poll_events()
+        vis.update_renderer()
 
-        print(
-            f"Loaded camera: "
-            f"{args.camera_file}"
-        )
-
-        return False
-
-    # ---------------------------------------------------------
-    # Save current screenshot
-    # ---------------------------------------------------------
-
-    def save_current_frame(vis_obj):
+        # Small pause lets Open3D finish updating
+        time.sleep(0.02)
 
         output_path = os.path.join(
             args.save_dir,
-            f"frame_{current_idx:03d}.png",
+            f"frame_{idx:03d}.png",
         )
 
-        vis_obj.poll_events()
-        vis_obj.update_renderer()
-
-        success = (
-            vis_obj.capture_screen_image(
-                output_path,
-                do_render=True,
-            )
+        vis.capture_screen_image(
+            output_path,
+            do_render=True,
         )
 
         print(
-            f"Saved screenshot: "
+            f"[{idx:03d}/{len(frame_files)-1:03d}] "
+            f"{os.path.basename(path)} | "
+            f"{len(xyz):,} points -> "
             f"{output_path}"
         )
 
-        return False
-
     # ---------------------------------------------------------
-    # Navigation callbacks
+    # Cleanup
     # ---------------------------------------------------------
-
-    def next_frame(vis_obj):
-        return update_frame(
-            current_idx + 1
-        )
-
-    def previous_frame(vis_obj):
-        return update_frame(
-            current_idx - 1
-        )
-
-    def quit_viewer(vis_obj):
-        vis_obj.close()
-        return False
-
-    # ---------------------------------------------------------
-    # Keyboard callbacks
-    # ---------------------------------------------------------
-
-    # N
-    vis.register_key_callback(
-        ord("N"),
-        next_frame,
-    )
-
-    # B
-    vis.register_key_callback(
-        ord("B"),
-        previous_frame,
-    )
-
-    # Right arrow
-    vis.register_key_callback(
-        262,
-        next_frame,
-    )
-
-    # Left arrow
-    vis.register_key_callback(
-        263,
-        previous_frame,
-    )
-
-    # C
-    vis.register_key_callback(
-        ord("C"),
-        save_camera,
-    )
-
-    # L
-    vis.register_key_callback(
-        ord("L"),
-        load_camera,
-    )
-
-    # S
-    vis.register_key_callback(
-        ord("S"),
-        save_current_frame,
-    )
-
-    # Q
-    vis.register_key_callback(
-        ord("Q"),
-        quit_viewer,
-    )
-
-    print(
-        f"Frame {current_idx:03d} | "
-        f"{os.path.basename(frame_files[current_idx])} | "
-        f"{len(xyz):,} points"
-    )
-
-    # ---------------------------------------------------------
-    # Run
-    # ---------------------------------------------------------
-
-    vis.run()
 
     vis.destroy_window()
+
+    print()
+    print(
+        f"Finished rendering {len(frame_files)} frames."
+    )
 
 
 if __name__ == "__main__":

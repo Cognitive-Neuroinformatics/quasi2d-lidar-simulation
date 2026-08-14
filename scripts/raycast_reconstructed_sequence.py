@@ -187,7 +187,15 @@ def main():
             point_cloud_range=POINT_CLOUD_RANGE,
         )
 
-        xyz_vehicle = frame["xyz"].astype(
+        print("Frame keys:", frame.keys())
+
+        for key, value in frame.items():
+            if isinstance(value, np.ndarray):
+                print(
+                    f"{key}: shape={value.shape}, dtype={value.dtype}"
+                )
+                
+                xyz_vehicle = frame["xyz"].astype(
             np.float32
         )
 
@@ -241,13 +249,21 @@ def main():
         # Output here is still VEHICLE frame.
         # -----------------------------------------------------
 
+        projection_method = common.get(
+            "projection_method",
+            "same_distance",
+        )
+
+        print(
+            "Projection method:",
+            projection_method,
+        )
+
         simulated_vehicle, ray_metadata = (
             transformer.transform_point_cloud(
                 sensor="scala2",
 
-                original_pointcloud=(
-                    reconstructed_pc
-                ),
+                original_pointcloud=reconstructed_pc,
 
                 start_point=start_point,
 
@@ -256,15 +272,11 @@ def main():
                 ),
 
                 horizontal_angle_min=float(
-                    common[
-                        "horizontal_angle_min"
-                    ]
+                    common["horizontal_angle_min"]
                 ),
 
                 horizontal_angle_max=float(
-                    common[
-                        "horizontal_angle_max"
-                    ]
+                    common["horizontal_angle_max"]
                 ),
 
                 horizontal_rays=None,
@@ -278,6 +290,8 @@ def main():
                 mirror_side=mirror_side,
 
                 scala2_common=common,
+
+                projection_method=projection_method,
             )
         )
 
@@ -336,6 +350,10 @@ def main():
                 args.sensor
             ),
 
+            projection_method=np.asarray(
+                projection_method
+            ),
+
             vehicle_to_sensor=(
                 T_sensor_from_vehicle
             ),
@@ -368,7 +386,6 @@ def main():
                 ray_metadata["column_id"]
             ),
         )
-
         print(
             "Saved:",
             output_path

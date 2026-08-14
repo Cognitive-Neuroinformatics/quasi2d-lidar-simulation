@@ -1,6 +1,7 @@
 dataset:
   data_percent: 100
-  sets_dir: "/data/waymo/ImageSets_samanti"
+  #sets_dir: "/data/waymo/ImageSets_samanti" # server
+  sets_dir: "/media/samanti/9137dc79-aec9-43a3-8017-08ed5130ad58/home/samanti/waymo/ImageSets_samanti" # PC
 
 bev:
   x_size: 1024
@@ -71,17 +72,20 @@ sensors:
     common:
       distance: 100.0
 
-      # Valid output FoV.
+      # Horizontal scan pattern
       horizontal_angle_min: -66.5
       horizontal_angle_max: 66.5
 
       inner_angle_min: -15.0
       inner_angle_max: 15.0
+
       horizontal_increment_inner: 0.125
       horizontal_increment_outer: 0.25
 
+      # Azimuth staggering between successive APD groups
       apd_group_azimuth_offset: 0.0181
-
-      # The manual gives the offset magnitude, but the sign depends on
-      # the azimuth convention. Keep this configurable.
       apd_group_azimuth_sign: 1.0
+
+      # Point placement after Bresenham selects the source point
+      # Options: same_distance, orthogonal
+      projection_method: orthogonal
