@@ -34,6 +34,6 @@ dist/
 Thumbs.db
 data/
 outputs/
-
+semantic_segmentation/accumulated_pc_point_association/semantic_association/
 
 *.npy
