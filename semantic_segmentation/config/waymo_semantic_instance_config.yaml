@@ -1,0 +1,61 @@
+# TOP-LiDAR semantic + persistent-instance propagation configuration
+
+input_output:
+  tfrecord: /media/samanti/9137dc79-aec9-43a3-8017-08ed5130ad58/home/samanti/waymo/raw_data/segment-1005081002024129653_5313_150_5333_150_with_camera_labels.tfrecord
+  output_dir: outputs/waymo_semantic_instances_full
+  start_frame: 0
+  end_frame: 198
+  overwrite: false
+
+frame_selection:
+  # When true, start_frame/end_frame above are ignored. The script detects TOP
+  # segmentation frames and saves every frame from the first labelled frame
+  # through the last labelled frame, including all missing frames in between.
+  use_segmentation_frame_bounds: true
+
+# A complete track is dynamic if either motion threshold is reached.
+track_selection:
+  dynamic_speed_threshold: 0.5
+  dynamic_displacement_threshold: 1.0
+  min_track_observations: 2
+
+# A box only collects candidates. It does not directly assign instance IDs.
+box_candidates:
+  box_margin_xy: 0.05
+  box_margin_z_top: 0.05
+  box_margin_z_bottom: 0.0
+  association_min_points: 3
+  association_min_purity: 0.5
+
+# Dynamic-instance association in the tracked object's local coordinates.
+# This requires a separate validation experiment from the static KNN settings.
+dynamic_object_knn:
+  object_k: 3
+  object_max_distance: 0.20
+  object_distance_margin: 0.03
+  max_reference_points: 100000
+
+# Final validated static-scene configuration:
+# coverage=99.62%, acc(valid)=97.96%, effective accuracy=97.59%,
+# mIoU excluding class 0=88.88%.
+static_knn:
+  static_k: 3
+  static_max_distance: 1.4
+  static_min_vote_fraction: 0.5
+  max_static_reference_points: 5000000
+
+# Reject road/background points that fall inside dynamic-object boxes.
+ground_rejection:
+  ground_ring_margin: 1.0
+  ground_plane_tolerance: 0.08
+  ground_ransac_iterations: 80
+  ground_min_ring_points: 30
+  strong_object_distance: 0.08
+
+output:
+  # False is recommended. When true, moving objects form temporal trails in
+  # the accumulated file; individual frame_index values are still retained.
+  save_combined_map: false
+
+reproducibility:
+  random_seed: 13

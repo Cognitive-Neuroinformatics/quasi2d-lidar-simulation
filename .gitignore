@@ -32,3 +32,10 @@ dist/
 # OS files
 .DS_Store
 Thumbs.db
+data/
+outputs/
+/test_data_output/
+docs/
+semantic_segmentation/accumulated_pc_point_association/semantic_association/
+
+*.npy
