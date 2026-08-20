@@ -7,6 +7,12 @@ input_output:
   end_frame: 198
   overwrite: false
 
+frame_selection:
+  # When true, start_frame/end_frame above are ignored. The script detects TOP
+  # segmentation frames and saves every frame from the first labelled frame
+  # through the last labelled frame, including all missing frames in between.
+  use_segmentation_frame_bounds: true
+
 # A complete track is dynamic if either motion threshold is reached.
 track_selection:
   dynamic_speed_threshold: 0.5

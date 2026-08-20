@@ -149,6 +149,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--end-frame", type=int, default=-1,
                         help="Inclusive; -1 means the final frame.")
+    parser.add_argument(
+        "--use-segmentation-frame-bounds",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Detect TOP segmentation frames dynamically and process every "
+             "frame from the first labelled frame through the last labelled "
+             "frame, inclusive. This overrides start_frame/end_frame.",
+    )
 
     parser.add_argument("--dynamic-speed-threshold", type=float, default=0.5)
     parser.add_argument("--dynamic-displacement-threshold", type=float,
@@ -264,6 +272,26 @@ def unpack_parse_result(frame: open_dataset.Frame):
             f"{len(parsed)}"
         )
     return range_images, camera_projections, segmentation_labels, top_pose
+
+
+def has_complete_top_segmentation(frame: open_dataset.Frame) -> bool:
+    """Return True when TOP segmentation exists for both LiDAR returns."""
+    _, _, segmentation_labels, _ = unpack_parse_result(frame)
+    top_labels = segmentation_labels.get(open_dataset.LaserName.TOP, [])
+    return (
+        len(top_labels) >= 2
+        and bool(top_labels[0].data)
+        and bool(top_labels[1].data)
+    )
+
+
+def discover_segmentation_frames(tfrecord: str) -> List[int]:
+    """Discover TOP segmentation-labelled frame indices without hardcoding."""
+    labelled = []
+    for frame_index, frame in iter_frames(tfrecord):
+        if has_complete_top_segmentation(frame):
+            labelled.append(frame_index)
+    return labelled
 
 
 def extract_top_both_returns(
@@ -785,6 +813,16 @@ def propagate_static_semantics(
     return result, confidence
 
 
+def semantic_to_ground_state(semantic_id: np.ndarray) -> np.ndarray:
+    """Map semantic classes to {-1 unknown, 0 non-ground, 1 ground}."""
+    state = np.full(len(semantic_id), -1, dtype=np.int8)
+    defined = semantic_id > 0
+    ground = np.isin(semantic_id, list(GROUND_SEMANTICS))
+    state[defined & ~ground] = 0
+    state[ground] = 1
+    return state
+
+
 def save_json(path: Path, payload) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
@@ -921,13 +959,31 @@ def process_and_save(
             semantic_id[static_mask] = propagated
             confidence[static_mask] = static_confidence
 
+        ground_state = semantic_to_ground_state(semantic_id)
+        # Homogeneous N x 6 representation requested for downstream use:
+        # [world_x, world_y, world_z, intensity, ground_state, instance_id].
+        # float64 preserves integer instance IDs exactly for the small scene-level
+        # IDs used here. Typed arrays are also stored separately below.
+        data_matrix = np.column_stack((
+            xyz_world.astype(np.float64),
+            intensity.astype(np.float64),
+            ground_state.astype(np.float64),
+            instance_id.astype(np.float64),
+        ))
+
         np.savez_compressed(
             output_path,
+            data=data_matrix,
+            data_columns=np.asarray([
+                "world_x", "world_y", "world_z", "intensity",
+                "ground_state", "instance_id",
+            ]),
             xyz=xyz_world.astype(np.float32),
             xyz_vehicle=xyz_vehicle.astype(np.float32),
             intensity=intensity.astype(np.float32),
             semantic_id=semantic_id,
             instance_id=instance_id,
+            ground_state=ground_state,
             is_dynamic=is_dynamic,
             confidence=confidence,
             frame_index=np.full(point_count, frame_index, dtype=np.int16),
@@ -941,10 +997,12 @@ def process_and_save(
         )
 
         if args.save_combined_map:
+            combined_chunks["data"].append(data_matrix)
             combined_chunks["xyz"].append(xyz_world.astype(np.float32))
             combined_chunks["intensity"].append(intensity.astype(np.float32))
             combined_chunks["semantic_id"].append(semantic_id)
             combined_chunks["instance_id"].append(instance_id)
+            combined_chunks["ground_state"].append(ground_state)
             combined_chunks["is_dynamic"].append(is_dynamic)
             combined_chunks["confidence"].append(confidence)
             combined_chunks["frame_index"].append(
@@ -961,12 +1019,17 @@ def process_and_save(
         )
 
     if args.save_combined_map and combined_chunks:
+        combined_payload = {
+            key: np.concatenate(chunks, axis=0)
+            for key, chunks in combined_chunks.items()
+        }
+        combined_payload["data_columns"] = np.asarray([
+            "world_x", "world_y", "world_z", "intensity",
+            "ground_state", "instance_id",
+        ])
         np.savez_compressed(
             output_dir / "combined_accumulated_map.npz",
-            **{
-                key: np.concatenate(chunks, axis=0)
-                for key, chunks in combined_chunks.items()
-            },
+            **combined_payload,
         )
 
     mapping = {
@@ -985,7 +1048,22 @@ def process_and_save(
         },
     }
     save_json(output_dir / "track_instance_mapping.json", mapping)
-    save_json(output_dir / "run_configuration.json", vars(args))
+    run_configuration = dict(vars(args))
+    run_configuration["detected_segmentation_frames"] = [
+        int(index) for index in labelled_frames
+    ]
+    run_configuration["effective_start_frame"] = int(args.start_frame)
+    run_configuration["effective_end_frame"] = int(args.end_frame)
+    run_configuration["data_columns"] = [
+        "world_x", "world_y", "world_z", "intensity",
+        "ground_state", "instance_id",
+    ]
+    run_configuration["ground_state_convention"] = {
+        "-1": "Waymo UNDEFINED or NN-unassigned semantic label",
+        "0": "non-ground semantic class 1-16",
+        "1": "ground semantic class 17-22",
+    }
+    save_json(output_dir / "run_configuration.json", run_configuration)
 
 
 def main() -> None:
@@ -993,6 +1071,21 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.random_seed)
+
+    print("Discovering TOP segmentation-labelled frames dynamically")
+    all_labelled_frames = discover_segmentation_frames(args.tfrecord)
+    if not all_labelled_frames:
+        raise RuntimeError(
+            "No frames with complete TOP segmentation labels were found."
+        )
+    print(f"Detected TOP segmentation frames: {all_labelled_frames}")
+    if args.use_segmentation_frame_bounds:
+        args.start_frame = int(all_labelled_frames[0])
+        args.end_frame = int(all_labelled_frames[-1])
+        print(
+            "Using dynamic segmentation bounds: "
+            f"frames {args.start_frame} through {args.end_frame}, inclusive"
+        )
 
     print("Pass 1/3: collecting and classifying Waymo box tracks")
     tracks = collect_tracks(args)
