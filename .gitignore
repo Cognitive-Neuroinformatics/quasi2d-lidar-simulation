@@ -32,3 +32,7 @@ dist/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Semantic MLS generated/build files
+semantic_MLS_surface_reconstruction_pipeline/build_pcl_mls/
+semantic_MLS_surface_reconstruction_pipeline/docs/
