@@ -36,3 +36,8 @@ Thumbs.db
 # Semantic MLS generated/build files
 semantic_MLS_surface_reconstruction_pipeline/build_pcl_mls/
 semantic_MLS_surface_reconstruction_pipeline/docs/
+data/
+outputs/
+/test_data_output/
+docs/
+*.npy
