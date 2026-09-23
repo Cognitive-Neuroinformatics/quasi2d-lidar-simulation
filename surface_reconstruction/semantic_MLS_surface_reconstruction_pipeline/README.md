@@ -1,8 +1,6 @@
-# Semantic static MLS v3 — unified CPU/CUDA rasterizer pipeline
+# Semantic MLS — unified CPU/CUDA rasterizer pipeline
 
-This folder combines the two uploaded strict-baseline packages into one runnable pipeline:
-
-1. CPU static-ground densification (TO DO what to do with curb?)
+1. CPU static-ground densification (TO DO!! what to do with curb? buildings? vegetation?)
 2. CPU semantic-aware PCL MLS reconstruction
 3. selectable SCALA2 rasterization:
    - CPU: original optimized CPU rasterizer
@@ -29,8 +27,6 @@ For CUDA:
   --cuda-precision float32
 ```
 
-The default backend is `cpu`.
-
 ## Switch rasterizers without rerunning densification and MLS
 
 After a reconstruction has already been produced, render it with CUDA only:
@@ -55,35 +51,6 @@ Or render the same reconstruction with CPU only:
   --skip-densify \
   --skip-reconstruct
 ```
-
-This is the cleanest way to compare the two rasterizers because they consume the same reconstruction.
-
-## Important baseline defaults
-
-The unified launcher preserves the full-pipeline settings used by the uploaded CPU/CUDA packages:
-
-- intersection mode: `tangent_patch`
-- patch radius: `0.03 m`
-- hit radius: `0.03 m`
-- minimum range: `0.5 m`
-- maximum range: `80 m`
-- first mirror side: `0`
-- exact structured SCALA2 lookup on CPU
-- CPU rasterizer default point batch: `500000`
-- CUDA rasterizer default point batch: `2000000`
-- CUDA default precision: `float32`
-- CUDA geometry cache: `5 GiB` per GPU
-- NPZ mode in the full benchmark launcher: `stored`
-
-
-
-## CUDA precision
-
-The original CUDA package defines two modes:
-
-- `--cuda-precision float32`: accelerated CUDA baseline. This is the unified default for CUDA.
-- `--cuda-precision float64`: reference-oriented CUDA mode for closer numerical comparison with the mostly-float64 CPU geometry path.
-
 
 ## Useful controls
 
@@ -137,5 +104,3 @@ python diagnostics/validate_cpu_vs_cuda.py \
   --range-atol 1e-5 \
   --xyz-atol 1e-5
 ```
-
-For the strictest comparison, first validate CUDA float64 against CPU. Then separately evaluate the intended CUDA float32 accelerator mode.
