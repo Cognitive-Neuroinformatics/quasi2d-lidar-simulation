@@ -1,6 +1,5 @@
-# UNIFIED WAYMO PREPROCESSING PIPELINE - CPU/CUDA BACKEND EDITION
+# UNIFIED WAYMO PREPROCESSING PIPELINE
 # Stages: TFRecord accumulation -> strict static filter -> ground densification.
-# Backend switch: --compute-backend cpu|cuda; multi-GPU: --gpu-ids 0,1,2.
 # Canonical final output: recon_related/<case>/static_recon_labels.npz
 # Intermediate diagnostics/products: recon_related/<case>/preprocessing_residues/
 
@@ -15,13 +14,7 @@ import time
 import zipfile
 import sys
 
-# -----------------------------------------------------------------------------
-# CPU THREAD CONFIGURATION
-# -----------------------------------------------------------------------------
-# Read --cpu-workers before importing NumPy/TensorFlow so BLAS/OpenMP libraries
-# see the requested thread count during initialization. 0 means all CPUs visible
-# to this process. Scenes are intentionally processed sequentially; expensive
-# cKDTree operations inside each scene use all configured workers.
+
 def _early_cpu_worker_count(argv):
     requested = 0
     for i, token in enumerate(argv):
@@ -40,6 +33,8 @@ for _name in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS', 'NUM
     os.environ[_name] = str(CPU_WORKERS)
 os.environ['TF_NUM_INTRAOP_THREADS'] = str(CPU_WORKERS)
 os.environ['TF_NUM_INTEROP_THREADS'] = str(TF_INTEROP_WORKERS)
+
+
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
@@ -54,13 +49,7 @@ from waymo_open_dataset import dataset_pb2 as open_dataset
 from waymo_open_dataset import label_pb2
 from waymo_open_dataset.utils import frame_utils
 
-# -----------------------------------------------------------------------------
-# SELECTABLE CPU / CUDA SPATIAL SEARCH BACKEND
-# -----------------------------------------------------------------------------
-# CPU mode uses scipy.spatial.cKDTree exactly as before.
-# CUDA mode uses cupyx.scipy.spatial.KDTree for the large exact k-NN searches.
-# Small trees and variable-length radius/connected-component searches stay on CPU.
-# The numerical preprocessing stages and output schema are otherwise unchanged.
+
 class SpatialSearchManager:
     def __init__(self):
         self.mode = 'cpu'
@@ -2027,17 +2016,6 @@ def ring_candidates_direct_z(intervals, origin_xy, sector_deg, fill_spacing, max
                              adaptive_scale=1.0, adaptive_min=0.01, adaptive_max=0.08,
                              radial_spacing_scale=1.0):
     """Generate support with exact same-sector ring interpolation.
-
-    In fixed mode, every accepted gap uses ``fill_spacing``.
-
-    In local_ring_density mode, every gap gets its own target spacing estimated
-    from the observed point density on the two rings that bracket that gap.
-    Dense observed rings therefore receive dense interpolated support, while
-    naturally sparse regions remain sparser.
-
-    Radial slope comes directly from the bracketing rings. Tangential slope is
-    estimated, when possible, from accepted neighbouring-sector surfaces at the
-    same radius.
     """
     if not intervals:
         empty3 = np.empty((0, 3), np.float32)
@@ -2288,10 +2266,6 @@ def reject_generic_support_in_dynamic_footprints_source_frame(xyz,source_type,so
 
 def reject_generic_support_in_dynamic_footprints_swept(xyz,source_type,box_cache,xy_margin=0.15):
     """Reject generic support inside ANY dynamic-object XY footprint in the scene.
-
-    This only removes generated source_type=4 support. Original measured ground
-    remains untouched. If a moving object occupied an XY location in any frame, generic coverage is
-    not allowed to invent ground there.
     """
     keep=np.ones(len(xyz),dtype=bool); generic=np.flatnonzero(np.asarray(source_type)==4)
     if not len(generic) or not box_cache: return keep,{}
@@ -2318,9 +2292,7 @@ def deduplicate_candidates(xyz, source, spacing, priority=None):
     cells = np.floor(xyz[:, :2] / spacing + 0.5).astype(np.int64)
     if priority is None:
         priority = np.zeros(len(xyz), dtype=np.float32)
-    # Preserve the original winner ordering: source ascending, then priority
-    # descending. np.unique is only used to find the first cell occurrence in
-    # that ranked order; sorting its returned positions restores loop order.
+
     rank = np.lexsort((-priority, source))
     ranked_cells = np.ascontiguousarray(cells[rank])
     key_dtype = np.dtype((np.void, ranked_cells.dtype.itemsize * ranked_cells.shape[1]))
@@ -2341,10 +2313,7 @@ def assign_support_source_indices(original_xyz, original_sem, support_xyz, suppo
     if len(support_xyz) == 0:
         return np.empty(0, dtype=np.int64)
 
-    # Keep the stored float32 geometry instead of eagerly duplicating the full
-    # original + support clouds as float64. scipy cKDTree converts each source
-    # subset/query to double internally, yielding the same distances/indices
-    # while substantially reducing peak RAM for 20M+ point scenes.
+
     original_xyz = np.asarray(original_xyz)
     original_sem = np.asarray(original_sem, dtype=np.int16)
     support_xyz = np.asarray(support_xyz)
@@ -2463,8 +2432,7 @@ def build_densified_npz_arrays(strict_path, support_xyz, support_sem, support_so
         [original_sem, np.asarray(support_sem, dtype=np.int16)], axis=0
     )
 
-    # Preserve every other aligned field without constructing a second dict of
-    # all generated metadata at once. This materially reduces peak RAM.
+
     for key, value in point_arrays.items():
         if key in ("xyz", "semantic_id", "data_labeled"):
             continue
@@ -2494,7 +2462,7 @@ def build_densified_npz_arrays(strict_path, support_xyz, support_sem, support_so
             [point_arrays["data_labeled"], support_rows], axis=0
         )
 
-    # Explicit provenance for the densification itself.
+
     merged["is_generated"] = np.concatenate([
         np.zeros(n_original, dtype=np.uint8),
         np.ones(n_support, dtype=np.uint8),
@@ -3176,7 +3144,7 @@ def run_integrated_densification(root, case, strict_path, static_dir, densificat
     print(f"[scene support] wrote {len(sx):,} support points: ring-direct-Z={(st==3).sum():,}, generic={(st==4).sum():,} -> {out}")
 
 
-    # Optional one-step densified export.
+
     if densified_pcd is not None or final_npz is not None:
         print("[densified export] mapping generated support to original metadata...")
 
@@ -3272,8 +3240,6 @@ def main():
     parser.add_argument('--skip-existing-scenes', action=argparse.BooleanOptionalAction, default=False, help='Batch mode only: skip a case only when its final PREPROCESSING_COMPLETE.json marker exists.')
     parser.add_argument('--save-combined-data-labeled', action=argparse.BooleanOptionalAction, default=True, help='Also save the convenience N x 7 float64 data_labeled matrix. Disable for large batches because it duplicates the named arrays.')
     parser.add_argument('--debug-foreground-source-frame',type=int,action='append',default=[])
-
-    # Integrated strict static-cloud filtering. Raw accumulation is preserved under preprocessing_residues/raw_accumulation.
     parser.add_argument('--run-static-filter', action=argparse.BooleanOptionalAction, default=True, help='After raw static accumulation, create a strict filtered static cloud. Raw accumulation is preserved under preprocessing_residues/raw_accumulation.')
     parser.add_argument('--static-filter-mode', choices=['conflict','unsupported','both'], default='both')
     parser.add_argument('--static-filter-threshold-percentile', type=float, default=99.0)
@@ -3754,11 +3720,7 @@ def main():
 
     with open(label_config_path, 'w') as f:
         json.dump({'frame_selection': args.frame_selection, 'segmentation_labelled_source_frames': labelled_frame_indices, 'output_to_source_frame': {str(output_idx): int(source_idx) for output_idx, source_idx in enumerate(output_source_indices)}, 'source_to_output_frame': {str(source_idx): int(output_idx) for source_idx, output_idx in source_to_output_index.items()}, 'static_knn': {'k': args.static_k, 'max_distance_m': args.static_max_distance, 'min_vote_fraction': args.static_min_vote_fraction}, 'object_knn': {'k': args.object_k, 'max_distance_m': args.object_max_distance, 'distance_margin_m': args.object_distance_margin}, 'ground_id_convention': {'-1': 'undefined or NN-unassigned', '0': 'non-ground semantic class 1-16', '1': 'ground semantic class 17-22'}, 'instance_id_convention': {'0': 'undefined, background, or no assigned instance', 'positive': 'stable scene-level tracked instance'}}, f, indent=2)
-    # ---------------------------------------------------------------------
-    # Integrated strict static post-filter. The raw accumulated files above
-    # are never overwritten. To reduce peak RAM, release preprocessing-only
-    # objects before loading the saved raw static NPZ for filtering.
-    # ---------------------------------------------------------------------
+
     static_filter_report = None
     if args.run_static_filter:
         import gc
