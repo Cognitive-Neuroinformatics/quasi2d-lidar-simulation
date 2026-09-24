@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 """NumPy implementation of the validated SCALA2 ray geometry.
-
-The formulas and calibration values mirror the supplied ``scala2_utils.py``
-reference.  This module stays NumPy-only so the point-surface baseline does
-not require PyTorch or a CUDA device just to construct rays.
 """
 
 from __future__ import annotations

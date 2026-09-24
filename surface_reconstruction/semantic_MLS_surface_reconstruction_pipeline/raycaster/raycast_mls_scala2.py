@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 """Raycast alternating SCALA2 scans against PCL-MLS point surfaces.
-
-For every ray, the raycaster evaluates finite local MLS tangent patches (or
-the optional point-tube baseline) and returns the physically valid intersection
-with the smallest positive range.  If two candidates have the same range, the
-one whose tangent-patch intersection lies closest to its MLS sample centre wins.  The full static reconstruction remains global; only spatial
-tiles capable of contributing within ``--max-range`` are queried per frame.
 """
 
 from __future__ import annotations
@@ -22,6 +16,7 @@ import time
 import numpy as np
 from scipy.spatial import cKDTree
 
+from scala2_noise import apply_scala2_measurement_noise
 from scala2_geometry import (
     SCALA2_HEIGHT,
     SCALA2_SENSOR_EXTRINSICS,
@@ -1242,6 +1237,11 @@ def parse_args():
             "across the road/sidewalk discontinuity."
         ),
     )
+    parser.add_argument("--noise-output", choices=["clean", "noisy", "both"], default="clean", help="clean=existing points/, noisy=points_noisy/ only, both=write both without reraycasting twice")
+    parser.add_argument("--noise-range-sigma-m", type=float, default=0.05, help="Gaussian range standard deviation in metres")
+    parser.add_argument("--noise-azimuth-sigma-deg", type=float, default=0.1, help="Gaussian azimuth standard deviation in degrees")
+    parser.add_argument("--noise-polar-sigma-deg", type=float, default=0.6, help="Gaussian polar/elevation standard deviation in degrees")
+    parser.add_argument("--noise-seed", type=int, default=12345, help="Base seed; realization is deterministic per frame and sensor")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     if args.minimum_range < 0 or args.max_range <= args.minimum_range:
@@ -1260,6 +1260,8 @@ def parse_args():
         parser.error("--ground-only requires --static-only")
     if args.include_curb and not args.ground_only:
         parser.error("--include-curb is meaningful only with --ground-only")
+    if min(args.noise_range_sigma_m, args.noise_azimuth_sigma_deg, args.noise_polar_sigma_deg) < 0:
+        parser.error("Noise standard deviations must be non-negative")
     args.dataset_root = args.dataset_root.resolve()
     if args.reconstruction_root is None:
         args.reconstruction_root = args.dataset_root / "mls_baseline" / args.caseid
@@ -1334,10 +1336,12 @@ def main():
     # output_root/front_center/points/017.npz
     # ...
     point_dirs = {}
+    noisy_point_dirs = {}
     for sensor_name in args.sensors:
-        point_dir = args.output_root / sensor_name / "points"
-        point_dir.mkdir(parents=True, exist_ok=True)
-        point_dirs[sensor_name] = point_dir
+        point_dirs[sensor_name] = args.output_root / sensor_name / "points"
+        noisy_point_dirs[sensor_name] = args.output_root / sensor_name / "points_noisy"
+        if args.noise_output in ("clean", "both"): point_dirs[sensor_name].mkdir(parents=True, exist_ok=True)
+        if args.noise_output in ("noisy", "both"): noisy_point_dirs[sensor_name].mkdir(parents=True, exist_ok=True)
 
     print("=" * 72)
     print("SCALA2 MLS POINT-SURFACE RAYCAST - CPU OPTIMIZED EXACT + TILE CULL + LAZY PROPERTIES")
@@ -1345,7 +1349,7 @@ def main():
     print(f"Case             : {args.caseid}")
     print(f"Frames           : {args.start_frame}..{end_frame - 1}")
     print(f"Sensors          : {args.sensors}")
-    print(f"Output layout    : <output>/<sensor>/points/<frame>.npz")
+    print(f"Output layout    : clean=points/, noisy=points_noisy/, selected={args.noise_output}")
     print(f"Maximum range    : {args.max_range:.3f} m")
     print(f"Ray hit radius   : {args.hit_radius:.3f} m")
     print(f"Intersection mode: {args.intersection_mode}")
@@ -1370,6 +1374,8 @@ def main():
     print(f"Logical CPUs     : {cpu_count}")
     print(f"Static only      : {args.static_only}")
     print(f"Ground only      : {args.ground_only}")
+    print(f"Noise output     : {args.noise_output}")
+    if args.noise_output != "clean": print(f"Noise sigma      : range={args.noise_range_sigma_m:.3f} m, azimuth={args.noise_azimuth_sigma_deg:.3f} deg, polar={args.noise_polar_sigma_deg:.3f} deg, seed={args.noise_seed}")
     if static_semantic_ids is not None:
         print(f"Static semantics : {sorted(static_semantic_ids)}")
 
@@ -1406,6 +1412,12 @@ def main():
             "ckdtree_workers": ckdtree_workers,
             "first_mirror_side": args.first_mirror_side,
             "ground_only": args.ground_only,
+            "noise_output": args.noise_output,
+            "noise_model": "independent_gaussian_spherical_post_hit_v1" if args.noise_output != "clean" else None,
+            "noise_range_sigma_m": args.noise_range_sigma_m,
+            "noise_azimuth_sigma_deg": args.noise_azimuth_sigma_deg,
+            "noise_polar_sigma_deg": args.noise_polar_sigma_deg,
+            "noise_seed": args.noise_seed,
             "static_semantic_ids": (
                 None if static_semantic_ids is None
                 else sorted(static_semantic_ids)
@@ -1421,9 +1433,13 @@ def main():
         mirror_side: int,
         prepared_dynamic: list[tuple[int, dict, Path, tuple[np.ndarray, np.ndarray]]],
     ):
-        output_path = point_dirs[sensor_name] / f"{frame_index:03d}.npz"
+        clean_output_path = point_dirs[sensor_name] / f"{frame_index:03d}.npz"
+        noisy_output_path = noisy_point_dirs[sensor_name] / f"{frame_index:03d}.npz"
+        required_paths = ([clean_output_path] if args.noise_output == "clean" else [noisy_output_path] if args.noise_output == "noisy" else [clean_output_path, noisy_output_path])
+        reuse_path = clean_output_path if args.noise_output in ("clean", "both") else noisy_output_path
 
-        if output_path.exists() and not args.overwrite:
+        if all(path.exists() for path in required_paths) and not args.overwrite:
+            output_path = reuse_path
             with np.load(output_path, allow_pickle=False) as existing:
                 expected_values = {
                     "minimum_range_m": args.minimum_range,
@@ -1542,11 +1558,15 @@ def main():
             sensor_to_vehicle=get_scala2_to_vehicle(sensor_name),
         )
         output_write_started = time.perf_counter()
-        save_npz(output_path, arrays, args.npz_compression)
+        noisy_arrays = None
+        if args.noise_output in ("noisy", "both"):
+            noisy_arrays = apply_scala2_measurement_noise(arrays, args.noise_range_sigma_m, args.noise_azimuth_sigma_deg, args.noise_polar_sigma_deg, args.noise_seed)
+        if args.noise_output in ("clean", "both") and (args.overwrite or not clean_output_path.exists()): save_npz(clean_output_path, arrays, args.npz_compression)
+        if args.noise_output in ("noisy", "both") and (args.overwrite or not noisy_output_path.exists()): save_npz(noisy_output_path, noisy_arrays, args.npz_compression)
         output_write_s = time.perf_counter() - output_write_started
         static_store.flush_bounds()
 
-        summary = frame_summary(arrays, total_rays)
+        summary = frame_summary(noisy_arrays if args.noise_output == "noisy" else arrays, total_rays)
         summary.update({
             "output_frame_index": frame_index,
             "source_frame_index": frame_mapping.get(frame_index, frame_index),

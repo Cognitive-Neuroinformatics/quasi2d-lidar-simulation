@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
 """CUDA backend for exact structured SCALA2 tangent-patch raycasting.
-
-This module moves the expensive per-point raycasting to PyTorch CUDA:
-
-  world/local -> sensor transform
-  range filtering
-  exact structured 16x653 SCALA2 candidate lookup
-  tangent-patch / point-tube intersection
-  per-ray nearest-hit reduction
-
-Only the final <=10,448 winning source rows are copied back to CPU for lazy
-metadata resolution by the existing CPU-side property store.
 """
 
 from __future__ import annotations

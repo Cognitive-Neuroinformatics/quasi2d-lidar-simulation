@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 """Build a semantic, instance-aware PCL-MLS scene for Scala2 raycasting.
-
-The accumulated static scene is split by Waymo semantic surface family before
-MLS. Tracked foreground objects are split again by stable instance id. Dynamic
-objects are reconstructed in their canonical box-local coordinates. The output
-layout is directly consumable by raycast_mls_scala2_hybrid.py.
 """
 
 from __future__ import annotations

@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
 """CUDA SCALA2 raycaster for the semantic MLS reconstruction.
-
-The geometry and visibility rules match the validated CPU renderer:
-  * same six SCALA2 extrinsics and alternating MS0/MS1 ray geometry
-  * same conservative tile-level visibility culling
-  * same finite point-tube or tangent-patch intersection
-  * same nearest positive hit per ray with support-distance tie-break
-  * same sensor-first output layout: <output>/<sensor>/points/<frame>.npz
-  * same lazy property resolution from the selected MLS source sample
-
-Only the heavy point geometry is moved to PyTorch CUDA. Metadata remains on CPU.
 """
 
 from __future__ import annotations
@@ -49,6 +39,7 @@ from raycast_mls_scala2 import (  # noqa: E402
     load_frame_mapping,
     save_npz,
 )
+from scala2_noise import apply_scala2_measurement_noise  # noqa: E402
 from scala2_geometry import (  # noqa: E402
     SCALA2_HEIGHT,
     SCALA2_SENSOR_EXTRINSICS,
@@ -476,6 +467,11 @@ def parse_args():
     parser.add_argument("--ground-only", action="store_true")
     parser.add_argument("--include-curb", action="store_true")
     parser.add_argument("--detailed-stats", action="store_true", help="Compute extra GPU point-in-FOV diagnostics; slightly slower.")
+    parser.add_argument("--noise-output", choices=["clean", "noisy", "both"], default="clean", help="clean=existing points/, noisy=points_noisy/ only, both=write both without reraycasting twice")
+    parser.add_argument("--noise-range-sigma-m", type=float, default=0.05)
+    parser.add_argument("--noise-azimuth-sigma-deg", type=float, default=0.1)
+    parser.add_argument("--noise-polar-sigma-deg", type=float, default=0.6)
+    parser.add_argument("--noise-seed", type=int, default=12345)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -491,6 +487,8 @@ def parse_args():
         parser.error("--ground-only requires --static-only")
     if args.include_curb and not args.ground_only:
         parser.error("--include-curb is meaningful only with --ground-only")
+    if min(args.noise_range_sigma_m, args.noise_azimuth_sigma_deg, args.noise_polar_sigma_deg) < 0:
+        parser.error("Noise standard deviations must be non-negative")
 
     args.dataset_root = args.dataset_root.resolve()
     if args.reconstruction_root is None:
@@ -585,10 +583,12 @@ def main():
     }
 
     point_dirs = {}
+    noisy_point_dirs = {}
     for sensor in args.sensors:
-        point_dir = args.output_root / sensor / "points"
-        point_dir.mkdir(parents=True, exist_ok=True)
-        point_dirs[sensor] = point_dir
+        point_dirs[sensor] = args.output_root / sensor / "points"
+        noisy_point_dirs[sensor] = args.output_root / sensor / "points_noisy"
+        if args.noise_output in ("clean", "both"): point_dirs[sensor].mkdir(parents=True, exist_ok=True)
+        if args.noise_output in ("noisy", "both"): noisy_point_dirs[sensor].mkdir(parents=True, exist_ok=True)
 
     print("=" * 80)
     print("SCALA2 MLS TANGENT-PATCH RAYCAST - PYTORCH CUDA")
@@ -596,7 +596,7 @@ def main():
     print(f"Case             : {args.caseid}")
     print(f"Frames           : {args.start_frame}..{end_frame - 1}")
     print(f"Sensors          : {args.sensors}")
-    print("Output layout    : <output>/<sensor>/points/<frame>.npz")
+    print(f"Output layout    : clean=points/, noisy=points_noisy/, selected={args.noise_output}")
     print(f"Devices          : {[str(d) for d in devices]}")
     for device in devices:
         props = torch.cuda.get_device_properties(device)
@@ -610,6 +610,8 @@ def main():
     print(f"Tile FOV cull    : {not args.no_tile_fov_cull}")
     print(f"NPZ output       : {args.npz_compression}")
     print(f"Static only      : {args.static_only}")
+    print(f"Noise output     : {args.noise_output}")
+    if args.noise_output != "clean": print(f"Noise sigma      : range={args.noise_range_sigma_m:.3f} m, azimuth={args.noise_azimuth_sigma_deg:.3f} deg, polar={args.noise_polar_sigma_deg:.3f} deg, seed={args.noise_seed}")
     print("Sensor -> device : " + ", ".join(f"{s}={sensor_device[s]}" for s in args.sensors))
 
     total_rays = SCALA2_HEIGHT * SCALA2_WIDTH
@@ -629,6 +631,12 @@ def main():
             "intersection_mode": args.intersection_mode,
             "npz_compression": args.npz_compression,
             "tile_fov_cull": not args.no_tile_fov_cull,
+            "noise_output": args.noise_output,
+            "noise_model": "independent_gaussian_spherical_post_hit_v1" if args.noise_output != "clean" else None,
+            "noise_range_sigma_m": args.noise_range_sigma_m,
+            "noise_azimuth_sigma_deg": args.noise_azimuth_sigma_deg,
+            "noise_polar_sigma_deg": args.noise_polar_sigma_deg,
+            "noise_seed": args.noise_seed,
         },
         "sensor_device": {s: str(sensor_device[s]) for s in args.sensors},
         "sensors": {s: [] for s in args.sensors},
@@ -640,8 +648,12 @@ def main():
         # Never run two independent renderers concurrently on one GPU. Different
         # GPUs still render in parallel through the frame-level executor.
         with lock, torch.cuda.device(device):
-            output_path = point_dirs[sensor_name] / f"{frame_index:03d}.npz"
-            if output_path.exists() and not args.overwrite:
+            clean_output_path = point_dirs[sensor_name] / f"{frame_index:03d}.npz"
+            noisy_output_path = noisy_point_dirs[sensor_name] / f"{frame_index:03d}.npz"
+            required_paths = ([clean_output_path] if args.noise_output == "clean" else [noisy_output_path] if args.noise_output == "noisy" else [clean_output_path, noisy_output_path])
+            reuse_path = clean_output_path if args.noise_output in ("clean", "both") else noisy_output_path
+            if all(path.exists() for path in required_paths) and not args.overwrite:
+                output_path = reuse_path
                 with np.load(output_path, allow_pickle=False) as existing:
                     summary = frame_summary(
                         {name: np.asarray(existing[name]) for name in ("xyz", "semantic_id", "source_type")},
@@ -730,11 +742,15 @@ def main():
             )
 
             write_started = time.perf_counter()
-            save_npz(output_path, arrays, args.npz_compression)
+            noisy_arrays = None
+            if args.noise_output in ("noisy", "both"):
+                noisy_arrays = apply_scala2_measurement_noise(arrays, args.noise_range_sigma_m, args.noise_azimuth_sigma_deg, args.noise_polar_sigma_deg, args.noise_seed)
+            if args.noise_output in ("clean", "both") and (args.overwrite or not clean_output_path.exists()): save_npz(clean_output_path, arrays, args.npz_compression)
+            if args.noise_output in ("noisy", "both") and (args.overwrite or not noisy_output_path.exists()): save_npz(noisy_output_path, noisy_arrays, args.npz_compression)
             write_s = time.perf_counter() - write_started
             static_store.flush_bounds()
 
-            summary = frame_summary(arrays, total_rays)
+            summary = frame_summary(noisy_arrays if args.noise_output == "noisy" else arrays, total_rays)
             elapsed = time.time() - started
             h2d_s = cache.h2d_seconds - h2d_before_s
             h2d_b = cache.h2d_bytes - h2d_before_b

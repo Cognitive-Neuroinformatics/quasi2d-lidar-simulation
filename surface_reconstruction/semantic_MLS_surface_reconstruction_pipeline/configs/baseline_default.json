@@ -1,52 +1,24 @@
 {
-  "schema_version": 1,
-  "description": "Baseline settings for semantic static densification + PCL MLS + selectable CPU/CUDA SCALA2 rasterization.",
+  "schema_version": 2,
+  "description": "Baseline settings for PCL semantic MLS + selectable CPU/CUDA SCALA-2 raycasting.",
   "run": {
-    "dataset_root": "/data/waymo/road_reconstruction_study",
-    "caseid": "segment-17135518413411879545_1480_000_1500_000_with_camera_labels",
+    "dataset_root": "/data/waymo/surface_reconstruction",
+    "caseid": "segment-89454214745557131_3160_000_3180_000_with_camera_labels",
     "rasterizer": "cuda",
     "npz_compression": "stored",
-    "fill_spacing_mode": "local_ring_density",
     "pcl_threads": 10,
     "mls_workers": 3,
     "attribute_workers": 1,
     "shm_min_free_gb": 8.0,
-    "raycast_sensors": [
-      "front_left",
-      "front_center",
-      "front_right",
-      "rear_left",
-      "rear_center",
-      "rear_right"
-    ],
+    "raycast_sensors": ["front_left", "front_center", "front_right", "rear_left", "rear_center", "rear_right"],
     "sensor_workers": 6,
     "raycast_start_frame": 0,
     "raycast_end_frame": null
   },
-  "densification": {
-    "generic_coverage": true,
-    "analysis_voxel_m": 0.05,
-    "fill_spacing_m": 0.03,
-    "adaptive_density_voxel_m": 0.01,
-    "adaptive_density_neighbors": 3,
-    "adaptive_query_neighbors": 16,
-    "adaptive_fill_scale": 1.0,
-    "adaptive_fill_min_m": 0.01,
-    "adaptive_fill_max_m": 0.08,
-    "min_separation_m": 0.01,
-    "deduplicate": true,
-    "dedup_spacing_m": 0.005,
-    "max_candidates_per_family": 0,
-    "max_support": 0
-  },
   "mls": {
     "pcl_executable": "build_pcl_mls/pcl_mls_reconstruct",
     "config_file": "semantic_static_mls_v1.json",
-    "stages": [
-      "background",
-      "static_objects",
-      "dynamic_objects"
-    ],
+    "stages": ["background", "static_objects", "dynamic_objects"],
     "tile_size_m": 25.0,
     "tile_halo_m": 0.5,
     "minimum_label_confidence": 0.66,
@@ -66,27 +38,31 @@
       "property_cache": 64,
       "overwrite": true
     },
+
+    "noise": {
+      "output": "both",
+      "range_sigma_m": 0.05,
+      "azimuth_sigma_deg": 0.1,
+      "polar_sigma_deg": 0.6,
+      "seed": 12345
+    },
+
     "cpu": {
       "candidate_lookup": "structured",
       "ray_neighbor_count": 0,
       "point_batch_size": 500000,
       "ckdtree_workers": 1
     },
+
     "cuda": {
       "point_batch_size": 2000000,
       "precision": "float64",
       "gpu_cache_gb_per_gpu": 5.0,
-      "devices": [
-        "0", "1", "2"
-      ],
+      "devices": ["0", "1", "2"],
       "detailed_stats": false
     }
   },
   "environment": {
-    "densify_omp_threads": 1,
-    "densify_openblas_threads": 1,
-    "densify_mkl_threads": 1,
-    "densify_numexpr_threads": 1,
     "reconstruct_openblas_threads": 1,
     "reconstruct_mkl_threads": 1,
     "reconstruct_numexpr_threads": 1,
