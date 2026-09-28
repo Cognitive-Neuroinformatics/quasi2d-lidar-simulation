@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "name": "hybrid_semantic_surface_v1",
+  "description": "Trajectory-independent semantic hybrid: explicit local 2.5D ground surfaces, explicit curb boundaries, PCL-MLS for remaining static semantics and object-local dynamics.",
+  "ground_families": [
+    {
+      "name": "road_lane",
+      "semantic_ids": [
+        18,
+        19
+      ],
+      "patch_size_m": 6.0,
+      "patch_stride_m": 2.0,
+      "support_cell_m": 0.2,
+      "support_min_count": 2,
+      "support_close_iterations": 1,
+      "sample_spacing_m": 0.05,
+      "minimum_patch_points": 150,
+      "huber_delta_m": 0.06,
+      "irls_iterations": 5,
+      "maximum_patch_p95_residual_m": 0.2,
+      "generated_weight": 0.25
+    },
+    {
+      "name": "other_ground",
+      "semantic_ids": [
+        20
+      ],
+      "patch_size_m": 6.0,
+      "patch_stride_m": 2.0,
+      "support_cell_m": 0.2,
+      "support_min_count": 2,
+      "support_close_iterations": 1,
+      "sample_spacing_m": 0.05,
+      "minimum_patch_points": 100,
+      "huber_delta_m": 0.07,
+      "irls_iterations": 5,
+      "maximum_patch_p95_residual_m": 0.25,
+      "generated_weight": 0.25
+    },
+    {
+      "name": "walkable_sidewalk",
+      "semantic_ids": [
+        21,
+        22
+      ],
+      "patch_size_m": 5.0,
+      "patch_stride_m": 1.5,
+      "support_cell_m": 0.15,
+      "support_min_count": 2,
+      "support_close_iterations": 1,
+      "sample_spacing_m": 0.05,
+      "minimum_patch_points": 80,
+      "huber_delta_m": 0.05,
+      "irls_iterations": 5,
+      "maximum_patch_p95_residual_m": 0.18,
+      "generated_weight": 0.25
+    }
+  ],
+  "curb": {
+    "voxel_size_m": 0.08,
+    "link_radius_m": 0.3,
+    "minimum_component_nodes": 8,
+    "minimum_curve_length_m": 0.5,
+    "curve_sample_spacing_m": 0.05,
+    "vertical_sample_spacing_m": 0.03,
+    "side_probe_m": 0.25,
+    "ground_query_max_distance_m": 0.6,
+    "minimum_curb_height_m": 0.025,
+    "maximum_curb_height_m": 0.35
+  }
+}

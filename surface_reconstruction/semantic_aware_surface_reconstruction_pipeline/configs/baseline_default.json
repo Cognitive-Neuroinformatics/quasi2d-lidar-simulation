@@ -1,0 +1,80 @@
+{
+  "schema_version": 4,
+  "description": "Hybrid semantic surface reconstruction + shared SCALA-2 raycaster. Noise is applied post-hit and is optional.",
+  "run": {
+    "dataset_root": "/data/waymo/Waymo_Surface_Reconstruction",
+    "rasterizer": "cuda",
+    "npz_compression": "stored",
+    "raycast_sensors": [
+      "front_left",
+      "front_center",
+      "front_right",
+      "rear_left",
+      "rear_center",
+      "rear_right"
+    ],
+    "raycast_start_frame": 0,
+    "raycast_end_frame": null
+  },
+  "reconstruction": {
+    "hybrid_config": "configs/hybrid_semantic_surface_v1.json",
+    "base_mls_config": "configs/semantic_static_mls_v1.json",
+    "pcl_executable": "build/pcl_mls/pcl_mls_reconstruct",
+    "tile_size_m": 25.0,
+    "tile_halo_m": 0.5,
+    "minimum_label_confidence": 0.66,
+    "surface_workers": 12,
+    "pcl_threads": 8,
+    "mls_workers": 3,
+    "attribute_workers": 1,
+    "include_dynamics": true
+  },
+  "raycast": {
+    "shared": {
+      "intersection_mode": "tangent_patch",
+      "patch_radius_m": 0.08,
+      "hit_radius_m": 0.03,
+      "minimum_range_m": 0.5,
+      "maximum_range_m": 80.0,
+      "first_mirror_side": 0,
+      "static_tile_cache": 64,
+      "property_cache": 64,
+      "overwrite": false
+    },
+    "noise": {
+      "output": "both",
+      "range_sigma_m": 0.05,
+      "azimuth_sigma_deg": 0.01,
+      "polar_sigma_deg": 0.06,
+      "seed": 12345,
+      "model": "datasheet_gaussian",
+      "incidence_max_angle_deg": 75.0,
+      "ablation_profiles": [
+        "range_only",
+        "azimuth_only",
+        "polar_only",
+        "angular_only",
+        "datasheet",
+        "incidence"
+      ]
+    },
+    "cpu": {
+      "candidate_lookup": "structured",
+      "ray_neighbor_count": 0,
+      "point_batch_size": 500000,
+      "sensor_workers": 6,
+      "ckdtree_workers": 1
+    },
+    "cuda": {
+      "point_batch_size": 2000000,
+      "precision": "float64",
+      "gpu_cache_gb_per_gpu": 5.0,
+      "devices": [
+        "0",
+        "1",
+        "2"
+      ],
+      "detailed_stats": false
+    }
+  }
+}
